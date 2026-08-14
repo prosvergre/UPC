@@ -1,0 +1,5 @@
+*.exe
+*.log
+settings.json
+proxies.json
+/build/

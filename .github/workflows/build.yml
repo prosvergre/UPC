@@ -1,0 +1,39 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build Windows GUI exe
+        run: |
+          go build -ldflags="-s -w -H=windowsgui" -o proxycheck-windows-amd64.exe .
+        env:
+          CGO_ENABLED: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proxycheck-windows-amd64
+          path: proxycheck-windows-amd64.exe
+
+  linux-arm64-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build ARM64 CLI (nogui, no cgo)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags nogui -ldflags="-s -w" -o proxycheck-arm64-cli .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proxycheck-arm64-cli
+          path: proxycheck-arm64-cli
