@@ -5,7 +5,25 @@ on:
     branches: [ main ]
   workflow_dispatch: {}
 
+env:
+  SINGBOX_VERSION: "1.14.4"
+
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Download sing-box (for integration tests)
+        run: |
+          curl -sSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          tar xzf sb.tgz
+          echo "SINGBOX_BIN=$PWD/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box" >> "$GITHUB_ENV"
+      - name: Test node + singbox packages
+        run: go test -v ./internal/node/... ./internal/singbox/...
+
   windows:
     runs-on: windows-latest
     steps:
@@ -15,13 +33,20 @@ jobs:
           go-version: '1.22'
       - name: Build Windows GUI exe
         run: |
-          go build -ldflags="-s -w -H=windowsgui" -o proxycheck-windows-amd64.exe .
+          go build -ldflags="-s -w -H=windowsgui" -o dist/proxycheck-windows-amd64.exe .
         env:
           CGO_ENABLED: 1
+      - name: Bundle sing-box
+        shell: bash
+        run: |
+          curl -sSL -o sb.zip "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-windows-amd64.zip"
+          unzip -q sb.zip -d sb
+          cp sb/sing-box-${SINGBOX_VERSION}-windows-amd64/* dist/
+          ls -la dist
       - uses: actions/upload-artifact@v4
         with:
           name: proxycheck-windows-amd64
-          path: proxycheck-windows-amd64.exe
+          path: dist/
 
   linux-arm64-cli:
     runs-on: ubuntu-latest
@@ -32,8 +57,14 @@ jobs:
           go-version: '1.22'
       - name: Build ARM64 CLI (nogui, no cgo)
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags nogui -ldflags="-s -w" -o proxycheck-arm64-cli .
+          mkdir dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags nogui -ldflags="-s -w" -o dist/proxycheck-arm64-cli .
+      - name: Bundle sing-box
+        run: |
+          curl -sSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-arm64.tar.gz"
+          tar xzf sb.tgz
+          cp sing-box-${SINGBOX_VERSION}-linux-arm64/sing-box dist/
       - uses: actions/upload-artifact@v4
         with:
           name: proxycheck-arm64-cli
-          path: proxycheck-arm64-cli
+          path: dist/
