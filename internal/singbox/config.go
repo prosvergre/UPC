@@ -57,6 +57,10 @@ func BuildConfig(s Spec) ([]byte, map[string]error, error) {
 			continue
 		}
 		seen[tag] = true
+		if err := node.Validate(n); err != nil {
+			skipped[n.ID()] = err
+			continue
+		}
 		o, isEndpoint, err := nodeObject(n, tag)
 		if err != nil {
 			skipped[n.ID()] = err

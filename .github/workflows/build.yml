@@ -22,7 +22,7 @@ jobs:
           tar xzf sb.tgz
           echo "SINGBOX_BIN=$PWD/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box" >> "$GITHUB_ENV"
       - name: Test node + singbox packages
-        run: go test -v ./internal/node/... ./internal/singbox/...
+        run: go test -v ./internal/node/... ./internal/singbox/... ./internal/engine/...
 
   windows:
     runs-on: windows-latest
