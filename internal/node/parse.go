@@ -125,7 +125,7 @@ func parseURLProto(raw string, proto string) (Node, error) {
 	switch proto {
 	case VLESS:
 		n.UUID = user
-		n.Flow = q.Get("flow")
+		n.Flow = normFlow(q.Get("flow"))
 		readTransport(&n, q)
 		readTLS(&n, q, false)
 	case Trojan:
@@ -412,4 +412,13 @@ func mostlyPrintable(b []byte) bool {
 		}
 	}
 	return float64(ok)/float64(len(b)) > 0.9
+}
+
+// normFlow: клиенты пишут xtls-rprx-vision-udp443 (то же vision + разрешение UDP/443);
+// ядро знает только xtls-rprx-vision.
+func normFlow(f string) string {
+	if f == "xtls-rprx-vision-udp443" {
+		return "xtls-rprx-vision"
+	}
+	return f
 }

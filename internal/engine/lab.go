@@ -92,7 +92,7 @@ type lane struct {
 	client   *http.Client
 }
 
-var badIdxRe = regexp.MustCompile(`(outbound|endpoint)\[(\d+)\]`)
+var badIdxRe = regexp.MustCompile(`(outbound|endpoint)s?\[(\d+)\]`)
 
 // NewLab запускает sing-box с серверами nodes и lanes линиями для HTTP-запросов.
 // Серверы, на которых ядро не стартует, исключаются и доступны через Skipped.

@@ -242,8 +242,11 @@ func addTLS(o obj, n node.Node) {
 	if len(n.ALPN) > 0 {
 		t["alpn"] = n.ALPN
 	}
+	// pinSHA256 у hysteria2 — отпечаток сертификата (другой формат, чем ждёт
+	// ядро). Серверы с пином обычно самоподписанные: для проверки доступности
+	// принимаем сертификат как есть.
 	if n.Extra["pin_sha256"] != "" {
-		t["certificate_public_key_sha256"] = []string{n.Extra["pin_sha256"]}
+		t["insecure"] = true
 	}
 	fp := n.Fingerprint
 	if n.Security == "reality" {

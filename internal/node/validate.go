@@ -36,6 +36,9 @@ func Validate(n Node) error {
 			}
 		}
 	case VLESS, VMess:
+		if n.Proto == VLESS && n.Flow != "" && n.Flow != "xtls-rprx-vision" {
+			return fmt.Errorf("vless: неподдерживаемый flow %q", n.Flow)
+		}
 		if !uuidRe.MatchString(n.UUID) {
 			return fmt.Errorf("%s: некорректный uuid", n.Proto)
 		}

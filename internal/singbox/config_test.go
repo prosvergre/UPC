@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"proxycheck/internal/node"
@@ -98,5 +99,19 @@ func TestRealSingboxCheck(t *testing.T) {
 	os.WriteFile(p, b, 0o600)
 	if out, err := exec.Command(bin, "check", "-c", p).CombinedOutput(); err != nil {
 		t.Fatalf("sing-box check: %v\n%s", err, out)
+	}
+}
+
+func TestHysteria2PinIsNotPassedAsPublicKeyHash(t *testing.T) {
+	n, err := node.Parse("hysteria2://auth@7.7.7.7:443?pinSHA256=AA:BB:CC:DD&sni=a.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := BuildConfig(Spec{Nodes: []node.Node{n}, Lines: []Line{{Port: 1080, NodeID: n.ID()}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "certificate_public_key_sha256") {
+		t.Fatal("pin нельзя передавать как certificate_public_key_sha256")
 	}
 }

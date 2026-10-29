@@ -151,3 +151,20 @@ func TestLabEndToEnd(t *testing.T) {
 		t.Error("через мёртвый сервер запрос не должен проходить")
 	}
 }
+
+func TestBadNodeIndexPatterns(t *testing.T) {
+	a, _ := node.Parse("socks5://1.1.1.1:1")
+	b, _ := node.Parse("socks5://2.2.2.2:1")
+	w := node.Node{Proto: node.WireGuard, Host: "3.3.3.3", Port: 1}
+	nodes := []node.Node{a, w, b}
+	for msg, want := range map[string]string{
+		"initialize outbound[1]: boom":               b.ID(), // wireguard — endpoint, в outbounds индекс 1 = b
+		"decode config: outbounds[0].tls.x: bad":     a.ID(),
+		"initialize endpoint[0]: invalid public_key": w.ID(),
+		"что-то совсем другое":                       "",
+	} {
+		if got := badNode(msg, nodes, nil); got != want {
+			t.Errorf("%q: got %q want %q", msg, got, want)
+		}
+	}
+}

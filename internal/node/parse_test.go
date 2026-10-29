@@ -109,3 +109,14 @@ func TestLegacySettingsJSON(t *testing.T) {
 		t.Fatalf("round trip: %+v %v", m, err)
 	}
 }
+
+func TestVlessFlowNormalizedAndValidated(t *testing.T) {
+	n, err := Parse("vless://11111111-2222-3333-4444-555555555555@1.1.1.1:443?flow=xtls-rprx-vision-udp443&security=tls")
+	if err != nil || n.Flow != "xtls-rprx-vision" || Validate(n) != nil {
+		t.Fatalf("%+v %v", n, err)
+	}
+	n, _ = Parse("vless://11111111-2222-3333-4444-555555555555@1.1.1.1:443?flow=weird")
+	if Validate(n) == nil {
+		t.Fatal("неизвестный flow должен отклоняться")
+	}
+}

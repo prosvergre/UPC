@@ -59,6 +59,11 @@ type Settings struct {
 	// LocalDNSEnabled — поднимать локальный DNS-резолвер (UDP:53),
 	// резолвящий через один из запущенных прокси.
 	LocalDNSEnabled bool `json:"local_dns_enabled"`
+
+	// WebListen — адрес веб-интерфейса (по умолчанию 127.0.0.1:8080).
+	// WebPasswordHash — bcrypt-хеш пароля; обязателен для нелокального адреса.
+	WebListen       string `json:"web_listen,omitempty"`
+	WebPasswordHash string `json:"web_password_hash,omitempty"`
 }
 
 // Bookmark — избранный сервер с комментарием пользователя. Хранится

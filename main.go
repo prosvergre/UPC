@@ -24,10 +24,14 @@ type RunOptions struct {
 func main() {
 	args := stripDebugFlag(os.Args[1:])
 
+	if isWebMode(args) {
+		os.Exit(runWeb(args))
+	}
+
 	if len(args) == 0 {
 		if !guiAvailable {
-			fmt.Println("Эта сборка без GUI. Используйте аргументы командной строки — см. -h.")
-			os.Exit(1)
+			// сборка без окна (Linux/Raspberry): по умолчанию — веб-интерфейс
+			os.Exit(runWeb(nil))
 		}
 		runGUI(RunOptions{})
 		return
