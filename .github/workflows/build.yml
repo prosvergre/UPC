@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch: {}
 
 env:
@@ -38,9 +39,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - name: Build Windows GUI exe
+      - name: Build Windows exe
         run: |
-          go build -ldflags="-s -w -H=windowsgui" -o dist/proxycheck-windows-amd64.exe .
+          go build -ldflags="-s -w -H=windowsgui" -o dist/proxycheck.exe .
         env:
           CGO_ENABLED: 1
       - name: Bundle sing-box
@@ -55,23 +56,59 @@ jobs:
           name: proxycheck-windows-amd64
           path: dist/
 
-  linux-arm64-cli:
+  linux:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [ arm64, amd64 ]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - name: Build ARM64 CLI (nogui, no cgo)
+      - name: Build (no GUI, no cgo; web interface by default)
         run: |
           mkdir dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags nogui -ldflags="-s -w" -o dist/proxycheck-arm64-cli .
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -tags nogui -ldflags="-s -w" -o dist/proxycheck .
       - name: Bundle sing-box
         run: |
-          curl -sSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-arm64.tar.gz"
+          curl -sSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${{ matrix.arch }}.tar.gz"
           tar xzf sb.tgz
-          cp sing-box-${SINGBOX_VERSION}-linux-arm64/sing-box dist/
+          cp sing-box-${SINGBOX_VERSION}-linux-${{ matrix.arch }}/sing-box dist/
+          chmod +x dist/*
       - uses: actions/upload-artifact@v4
         with:
-          name: proxycheck-arm64-cli
+          name: proxycheck-linux-${{ matrix.arch }}
           path: dist/
+
+  release:
+    needs: [ test, windows, linux ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Package
+        run: |
+          mkdir out
+          (cd art/proxycheck-windows-amd64 && zip -qr ../../out/proxycheck-windows-amd64.zip .)
+          for a in arm64 amd64; do
+            tar czf out/proxycheck-linux-$a.tar.gz -C art/proxycheck-linux-$a .
+          done
+          ls -la out
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            gh release create "$TAG" out/* --title "$TAG" --generate-notes
+          else
+            gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+            gh release create nightly out/* --prerelease --target "${GITHUB_SHA}" \
+              --title "Nightly (последняя сборка main)" \
+              --notes "Автосборка коммита ${GITHUB_SHA::7}. Windows: распаковать zip, запустить proxycheck.exe -web. Linux: распаковать tar.gz, запустить ./proxycheck."
+          fi

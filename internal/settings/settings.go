@@ -100,6 +100,7 @@ type ScanRow struct {
 	UlSpeedMbps      float64 `json:"ul_speed_mbps,omitempty"`
 	UlSpeedDone      bool    `json:"ul_speed_done,omitempty"`
 	UlSpeedAttempted bool    `json:"ul_speed_attempted,omitempty"`
+	Pinned           bool    `json:"pinned,omitempty"` // добавлен вручную: не удаляется при проверке
 }
 
 // DefaultPath возвращает путь к settings.json рядом с исполняемым

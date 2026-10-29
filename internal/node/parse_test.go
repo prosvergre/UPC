@@ -3,6 +3,7 @@ package node
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -118,5 +119,44 @@ func TestVlessFlowNormalizedAndValidated(t *testing.T) {
 	n, _ = Parse("vless://11111111-2222-3333-4444-555555555555@1.1.1.1:443?flow=weird")
 	if Validate(n) == nil {
 		t.Fatal("неизвестный flow должен отклоняться")
+	}
+}
+
+func TestUserSamples(t *testing.T) {
+	samples := []struct {
+		raw, proto, host string
+		port             int
+		nameHas          string
+	}{
+		{"ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M=@141.98.101.181:443#%F0%9F%87%AC%F0%9F%87%A7%20United%20Kingdom%20-%20Manchester%20%F0%9F%8C%8D%20SS-TCP-NA%204%20-%20ETOT%20WAS%20-%20%206:47:59%20%2028.10.2026%20%D0%A1%D1%80%20%F0%9F%A1%85%20=%20XX%20%F0%9F%A1%87%20=%20XX", SS, "141.98.101.181", 443, "United Kingdom"},
+		{"vless://931729a8-3c20-4841-89a1-f18dc9ce0a6f@cdn9-33.vk-cdnvideo.com:8443?security=tls&type=tcp&encryption=none#%F0%9F%87%A9%F0%9F%87%AA[openproxylist.com]%20vless-DE%20-%20ETOT%20BJL%20-%2009.06.2026%20%D0%92%D1%82%20-%2027.06.2026%20%D0%A1%D0%B1%20%F0%9F%A1%85%20=%2078%20%F0%9F%A1%87%20=%20184", VLESS, "cdn9-33.vk-cdnvideo.com", 8443, "vless-DE"},
+		{"vmess://eyJhZGQiOiIxMjkuMTQ2LjE0My44MCIsImFpZCI6IjAiLCJob3N0IjoiIiwiaWQiOiJkNDYwM2NjMi1lMGVlLTQ2NTEtODNmNS0xZGI1YjcxNjgxNzciLCJuZXQiOiJ0Y3AiLCJwYXRoIjoiIiwicG9ydCI6IjQ4MTExIiwicHMiOiLwn4e68J+HuFtvcGVucHJveHlsaXN0LmNvbV0gdm1lc3MtVVMiLCJzY3kiOiJhdXRvIiwic25pIjoiIiwidGxzIjoiIiwidHlwZSI6Im5vbmUiLCJ2IjoiMiJ9", VMess, "129.146.143.80", 48111, "vmess-US"},
+		{"trojan://22367c45-f6c4-4ca8-8d52-d9787d7bbe91@104.16.149.10:443?security=tls&sni=cm2-bpg.filegear-sg.me&allowInsecure=1&type=ws&path=/proxyip%3D210.61.97.241:81&host=cm2-bpg.filegear-sg.me#%F0%9F%94%92%20TR-WS-TLS%20%F0%9F%8F%B4%E2%80%8D%E2%98%A0%EF%B8%8F%20NA-104.16.149.10:443%20%F0%9F%93%A1%20PING-001.75-MS", Trojan, "104.16.149.10", 443, "TR-WS-TLS"},
+		{"ss://YWVzLTI1Ni1nY206ZGVuaTE5ODM=@172.29.37.240:10001#Trixie%20-%20Over%20ZRT%20raspi%20-%20xray", SS, "172.29.37.240", 10001, "Trixie"},
+		{"http://Prox:pass@189.110.65.145:3001#MiSina%20HTTP", HTTP, "189.110.65.145", 3001, "MiSina HTTP"},
+	}
+	var all strings.Builder
+	for _, s := range samples {
+		n, err := Parse(s.raw)
+		if err != nil {
+			t.Errorf("%.40s: %v", s.raw, err)
+			continue
+		}
+		if n.Proto != s.proto || n.Host != s.host || n.Port != s.port || !strings.Contains(n.Name, s.nameHas) {
+			t.Errorf("%.40s: %+v", s.raw, n)
+		}
+		if err := Validate(n); err != nil {
+			t.Errorf("Validate %.40s: %v", s.raw, err)
+		}
+		all.WriteString(s.raw + "\n")
+	}
+	if got := ExtractAll(all.String()); len(got) != len(samples) {
+		t.Errorf("ExtractAll: %d из %d", len(got), len(samples))
+	}
+	if n, _ := Parse(samples[3].raw); n.Network != "ws" || n.Path != "/proxyip=210.61.97.241:81" || !n.Insecure || n.SNI != "cm2-bpg.filegear-sg.me" {
+		t.Errorf("trojan поля: %+v", n)
+	}
+	if n, _ := Parse(samples[5].raw); n.Username != "Prox" || n.Password != "pass" {
+		t.Errorf("http учётка: %+v", n)
 	}
 }

@@ -134,3 +134,45 @@ func TestNonLoopbackRequiresPassword(t *testing.T) {
 		t.Fatal("IsLoopback")
 	}
 }
+
+func TestImportAndConfig(t *testing.T) {
+	_, ts := newTestServer(t, "")
+	text := "ss://YWVzLTI1Ni1nY206ZGVuaTE5ODM=@172.29.37.240:10001#Trixie%20-%20Over%20ZRT\n" +
+		"http://Prox:pass@189.110.65.145:3001#MiSina%20HTTP\nvless://not-a-uuid@h.com:443\nмусор\n"
+	body := `{"text":` + jsonStr(text) + `,"check":false}`
+	r := do(t, ts.Client(), "POST", ts.URL+"/api/import", body, xr)
+	if r.StatusCode != 200 {
+		t.Fatalf("import: %d", r.StatusCode)
+	}
+	var res struct {
+		Added, Rejected int
+		IDs             []string `json:"ids"`
+	}
+	decode(t, r, &res)
+	if res.Added != 2 || len(res.IDs) != 2 || res.Rejected != 1 {
+		t.Fatalf("итог импорта: %+v", res)
+	}
+	// повторная вставка не плодит дубликаты
+	r = do(t, ts.Client(), "POST", ts.URL+"/api/import", body, xr)
+	var again struct{ Added, Existing int }
+	decode(t, r, &again)
+	if again.Added != 0 || again.Existing != 2 {
+		t.Fatalf("повторный импорт: %+v", again)
+	}
+	r = do(t, ts.Client(), "GET", ts.URL+"/api/config?id="+res.IDs[0], "", nil)
+	var ci struct {
+		Link   string
+		Fields map[string]string
+	}
+	decode(t, r, &ci)
+	if !strings.HasPrefix(ci.Link, "ss://") || ci.Fields["Адрес"] != "172.29.37.240:10001" || ci.Fields["Шифр/метод"] != "aes-256-gcm" {
+		t.Fatalf("config: %+v", ci)
+	}
+	// удаление
+	if r := do(t, ts.Client(), "POST", ts.URL+"/api/delete", `{"id":"`+res.IDs[0]+`"}`, xr); r.StatusCode != 200 {
+		t.Fatalf("delete: %d", r.StatusCode)
+	}
+	if r := do(t, ts.Client(), "GET", ts.URL+"/api/config?id="+res.IDs[0], "", nil); r.StatusCode != 400 {
+		t.Fatalf("после удаления конфиг не должен находиться: %d", r.StatusCode)
+	}
+}

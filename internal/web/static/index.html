@@ -30,6 +30,11 @@ tbody tr:nth-child(even){background:var(--row)}
 #login div{display:flex;flex-direction:column;gap:8px;width:260px}
 input[type=password],input[type=number]{font:inherit;padding:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:4px}
 .err{color:var(--bad)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:20;padding:10px}
+.modal>div{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:14px;width:min(720px,100%);max-height:90vh;overflow:auto;display:flex;flex-direction:column;gap:8px}
+textarea{font:12px ui-monospace,Consolas,monospace;width:100%;min-height:120px;padding:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:4px;resize:vertical}
+.fields td{padding:2px 8px 2px 0;border:0;white-space:normal;word-break:break-all}.fields td:first-child{color:var(--mut)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 </style>
 </head>
 <body>
@@ -44,6 +49,7 @@ input[type=password],input[type=number]{font:inherit;padding:6px;border:1px soli
   <button id="scan">Загрузить и проверить</button>
   <button id="recheck">Перепроверить</button>
   <button id="speed">Скорость отмеченных</button>
+  <button id="paste">Вставить конфиг</button>
   <button id="cancel" disabled>Отмена</button>
   <div id="status"><span id="stText">…</span><div id="bar"><i></i></div></div>
   <button id="logout" style="display:none">Выйти</button>
@@ -59,6 +65,23 @@ input[type=password],input[type=number]{font:inherit;padding:6px;border:1px soli
   <h2>Журнал</h2>
   <div id="log"></div>
 </main>
+
+<div class="modal" id="mImport"><div>
+  <b>Вставить конфиги</b>
+  <span style="color:var(--mut)">Ссылки ss://, vless://, vmess://, trojan://, socks5://, http://, hysteria2://, tuic://, wireguard://, ssh:// — по одной в строке, либо подписка целиком.</span>
+  <textarea id="impText" placeholder="ss://...&#10;vless://..."></textarea>
+  <label><input type="checkbox" id="impCheck" checked> сразу проверить добавленные</label>
+  <div id="impRes" class="err"></div>
+  <div class="row"><button id="impGo">Добавить</button><button id="impClip">Из буфера обмена</button><button data-close>Закрыть</button></div>
+</div></div>
+<div class="modal" id="mCfg"><div>
+  <b id="cfgTitle">Конфиг</b>
+  <textarea id="cfgLink" readonly></textarea>
+  <div class="row"><button id="cfgCopy">Копировать ссылку</button><span id="cfgMsg" style="color:var(--ok)"></span></div>
+  <div id="cfgSkip" class="err"></div>
+  <table class="fields"><tbody id="cfgFields"></tbody></table>
+  <div class="row"><button data-close>Закрыть</button></div>
+</div></div>
 
 <script>
 const $=id=>document.getElementById(id);
@@ -116,7 +139,8 @@ function render(s){
   <td><span class="st ${r.status}"></span>${STR[r.status]||r.status}</td><td>${esc(r.name)}</td><td>${esc(r.proto)}</td><td>${esc(r.host)}:${r.port}</td>
   <td class="num">${r.status==='alive'?r.latency_ms+' мс':''}</td><td>${esc(r.exit_ip||'')}</td>
   <td class="num">${r.speed_mbps?r.speed_mbps.toFixed(1):''}</td><td class="num">${r.ul_mbps?r.ul_mbps.toFixed(1):''}</td>
-  <td>${r.running?`<button data-stop="${esc(r.id)}">Стоп :${r.local_port}</button>`:(r.status==='alive'?`<button data-start="${esc(r.id)}">Старт</button>`:'')}</td></tr>`).join('');
+  <td>${r.running?`<button data-stop="${esc(r.id)}">Стоп :${r.local_port}</button>`:(r.status==='alive'?`<button data-start="${esc(r.id)}">Старт</button>`:'')}
+  <button data-cfg="${esc(r.id)}">Конфиг</button>${r.pinned?` <button data-del="${esc(r.id)}" title="Убрать из списка">✕</button>`:''}</td></tr>`).join('');
   const lg=$('log'),atEnd=lg.scrollTop+lg.clientHeight>=lg.scrollHeight-8;
   lg.textContent=(s.log||[]).join('\n');if(atEnd)lg.scrollTop=lg.scrollHeight;
 }
@@ -125,12 +149,50 @@ document.addEventListener('click',async e=>{
   try{
     if(st.start)await api('POST','/api/line',{id:st.start,port:0});
     if(st.stop)await api('DELETE','/api/line?id='+encodeURIComponent(st.stop));
+    if(st.cfg)await openCfg(st.cfg);
+    if(st.del&&confirm('Убрать сервер из списка?'))await api('POST','/api/delete',{id:st.del});
+    if(e.target.hasAttribute('data-close'))e.target.closest('.modal').style.display='none';
   }catch(err){if(err.message!=='auth')alert(err.message)}
-  if(st.start||st.stop)poll();
+  if(st.start||st.stop||st.del)poll();
 });
 document.addEventListener('change',e=>{
   if(e.target.classList.contains('sel'))api('POST','/api/select',{id:e.target.dataset.id,on:e.target.checked}).catch(()=>{});
 });
+
+async function copyText(text){
+  try{await navigator.clipboard.writeText(text);return true}catch(e){}
+  const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();
+  let ok=false;try{ok=document.execCommand('copy')}catch(e){}t.remove();return ok;
+}
+async function openCfg(id){
+  const c=await api('GET','/api/config?id='+encodeURIComponent(id));
+  $('cfgTitle').textContent='Конфиг: '+(c.fields['Имя']||c.fields['Адрес']);
+  $('cfgLink').value=c.link||'';$('cfgMsg').textContent='';
+  $('cfgSkip').textContent=c.skipped?'Ядро не сможет использовать этот сервер: '+c.skipped:'';
+  $('cfgFields').innerHTML=Object.entries(c.fields).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
+  $('mCfg').style.display='flex';
+}
+$('cfgCopy').onclick=async()=>{
+  const ok=await copyText($('cfgLink').value);
+  $('cfgMsg').textContent=ok?'Скопировано':'';
+  if(!ok){$('cfgLink').select();$('cfgMsg').textContent='Выделено — нажмите Ctrl+C'}
+};
+$('paste').onclick=()=>{$('impText').value='';$('impRes').textContent='';$('mImport').style.display='flex';$('impText').focus()};
+$('impClip').onclick=async()=>{
+  try{$('impText').value=await navigator.clipboard.readText()}
+  catch(e){$('impRes').textContent='Браузер не дал доступ к буферу (нужен HTTPS или localhost) — вставьте вручную: Ctrl+V'}
+};
+$('impGo').onclick=async()=>{
+  $('impRes').style.color='var(--bad)';$('impRes').textContent='';
+  try{
+    const r=await api('POST','/api/import',{text:$('impText').value,check:$('impCheck').checked});
+    let m=`Добавлено: ${r.added}, уже было: ${r.existing}, отклонено: ${r.rejected}`;
+    if(r.rejections&&r.rejections.length)m+='\n'+r.rejections.join('\n');
+    $('impRes').style.color=r.added+r.existing?'var(--ok)':'var(--bad)';$('impRes').style.whiteSpace='pre-wrap';$('impRes').textContent=m;
+    poll();
+  }catch(e){if(e.message!=='auth')$('impRes').textContent=e.message}
+};
+document.addEventListener('keydown',e=>{if(e.key==='Escape')document.querySelectorAll('.modal').forEach(m=>m.style.display='none')});
 
 let timer=null;
 async function poll(){

@@ -97,6 +97,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/select", s.guard(post(s.handleSelect)))
 	mux.HandleFunc("/api/line", s.guard(s.handleLine))
 	mux.HandleFunc("/api/speed", s.guard(post(s.handleSpeed)))
+	mux.HandleFunc("/api/config", s.guard(s.handleConfig))
+	mux.HandleFunc("/api/import", s.guard(post(s.handleImport)))
+	mux.HandleFunc("/api/delete", s.guard(post(s.handleDelete)))
+	mux.HandleFunc("/api/check", s.guard(post(s.handleCheck)))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -309,4 +313,51 @@ func (s *Server) handleSpeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.run(w, s.App.SpeedTest(b.IDs))
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	ci, err := s.App.Config(r.URL.Query().Get("id"))
+	if err != nil {
+		s.run(w, err)
+		return
+	}
+	writeJSON(w, 200, ci)
+}
+
+func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Text  string `json:"text"`
+		Check bool   `json:"check"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&b) != nil || strings.TrimSpace(b.Text) == "" {
+		s.run(w, fmt.Errorf("пустой текст"))
+		return
+	}
+	res := s.App.Import(b.Text)
+	if b.Check && len(res.IDs) > 0 {
+		_ = s.App.CheckIDs(res.IDs) // если занято — просто не запустится, список обновится позже
+	}
+	writeJSON(w, 200, res)
+}
+
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		ID string `json:"id"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&b) != nil || b.ID == "" {
+		s.run(w, fmt.Errorf("некорректный запрос"))
+		return
+	}
+	s.run(w, s.App.Delete(b.ID))
+}
+
+func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		IDs []string `json:"ids"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&b) != nil {
+		s.run(w, fmt.Errorf("некорректный запрос"))
+		return
+	}
+	s.run(w, s.App.CheckIDs(b.IDs))
 }

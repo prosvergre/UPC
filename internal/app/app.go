@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,7 @@ type Row struct {
 	Selected  bool    `json:"selected"`
 	SpeedMbps float64 `json:"speed_mbps,omitempty"`
 	UlMbps    float64 `json:"ul_mbps,omitempty"`
+	Pinned    bool    `json:"pinned,omitempty"`
 
 	node node.Node
 }
@@ -117,7 +119,7 @@ func New(settingsPath string) *App {
 	}
 	for _, sr := range a.settings.LastScanServers {
 		r := &Row{node: sr.Server, Status: normStatus(sr), LatencyMs: sr.LatencyMs, ExitIP: sr.ExitIP,
-			Selected: sr.Selected, SpeedMbps: sr.SpeedMbps, UlMbps: sr.UlSpeedMbps}
+			Selected: sr.Selected, SpeedMbps: sr.SpeedMbps, UlMbps: sr.UlSpeedMbps, Pinned: sr.Pinned}
 		fill(r)
 		a.rows = append(a.rows, r)
 	}
@@ -250,7 +252,7 @@ func (a *App) Scan() error {
 		}
 		a.mu.Lock()
 		for _, r := range a.rows { // важные строки освежаем вместе со всеми
-			if (r.Running || r.Selected) && !seen[r.ID] {
+			if (r.Running || r.Selected || r.Pinned) && !seen[r.ID] {
 				seen[r.ID] = true
 				all = append(all, r.node)
 			}
@@ -345,7 +347,7 @@ func (a *App) applyResults(results []engine.Result) {
 	for _, res := range results {
 		id := res.Node.ID()
 		p := prev[id]
-		important := p != nil && (p.Running || p.Selected || p.Status == StatusAlive || p.Status == StatusDied)
+		important := p != nil && (p.Running || p.Selected || p.Pinned || p.Status == StatusAlive || p.Status == StatusDied)
 		seen[id] = true
 		if !res.Alive && !important {
 			continue
@@ -355,7 +357,7 @@ func (a *App) applyResults(results []engine.Result) {
 		prevStatus := StatusUnknown
 		if p != nil {
 			prevStatus = p.Status
-			r.Running, r.LocalPort, r.Selected = p.Running, p.LocalPort, p.Selected
+			r.Running, r.LocalPort, r.Selected, r.Pinned = p.Running, p.LocalPort, p.Selected, p.Pinned
 			r.ExitIP, r.SpeedMbps, r.UlMbps = p.ExitIP, p.SpeedMbps, p.UlMbps
 		}
 		r.Status = nextStatus(prevStatus, res.Alive)
@@ -365,7 +367,7 @@ func (a *App) applyResults(results []engine.Result) {
 		rows = append(rows, r)
 	}
 	for id, p := range prev { // линии и отмеченные не теряем, даже если не попали в проверку
-		if !seen[id] && (p.Running || p.Selected) {
+		if !seen[id] && (p.Running || p.Selected || p.Pinned) {
 			rows = append(rows, p)
 		}
 	}
@@ -431,7 +433,7 @@ func (a *App) save() {
 	for _, r := range a.rows {
 		st.LastScanServers = append(st.LastScanServers, settings.ScanRow{Server: r.node, Status: r.Status,
 			Alive: r.Status == StatusAlive, LatencyMs: r.LatencyMs, Selected: r.Selected, ExitIP: r.ExitIP,
-			SpeedMbps: r.SpeedMbps, SpeedDone: r.SpeedMbps > 0, UlSpeedMbps: r.UlMbps, UlSpeedDone: r.UlMbps > 0})
+			SpeedMbps: r.SpeedMbps, SpeedDone: r.SpeedMbps > 0, UlSpeedMbps: r.UlMbps, UlSpeedDone: r.UlMbps > 0, Pinned: r.Pinned})
 	}
 	a.settings = st
 	a.mu.Unlock()
@@ -573,4 +575,219 @@ func (a *App) UpdateSettings(f func(*settings.Settings)) {
 	st := a.settings
 	a.mu.Unlock()
 	_ = settings.Save(a.path, st)
+}
+
+// ConfigInfo — конфиг сервера для показа/копирования.
+type ConfigInfo struct {
+	ID      string            `json:"id"`
+	Link    string            `json:"link"`
+	Fields  map[string]string `json:"fields"`
+	Skipped string            `json:"skipped,omitempty"` // почему ядро не сможет его использовать
+}
+
+// Config возвращает ссылку и разобранные поля сервера id.
+func (a *App) Config(id string) (ConfigInfo, error) {
+	a.mu.Lock()
+	r, ok := a.find(id)
+	var n node.Node
+	if ok {
+		n = r.node
+	}
+	a.mu.Unlock()
+	if !ok {
+		return ConfigInfo{}, fmt.Errorf("сервер не найден")
+	}
+	ci := ConfigInfo{ID: id, Link: n.Raw, Fields: map[string]string{}}
+	add := func(k, v string) {
+		if v != "" {
+			ci.Fields[k] = v
+		}
+	}
+	add("Протокол", n.Proto)
+	add("Имя", n.Name)
+	add("Адрес", n.Addr())
+	add("Пользователь", n.Username)
+	add("Пароль", n.Password)
+	add("UUID", n.UUID)
+	add("Шифр/метод", n.Method)
+	add("Flow", n.Flow)
+	add("Транспорт", n.Network)
+	add("Путь", n.Path)
+	add("Host", n.HostHeader)
+	add("Служба gRPC", n.ServiceName)
+	add("Безопасность", n.Security)
+	add("SNI", n.SNI)
+	add("Fingerprint", n.Fingerprint)
+	add("Reality ключ", n.PublicKey)
+	add("Reality short id", n.ShortID)
+	add("Плагин", n.Plugin)
+	if n.Insecure {
+		add("Проверка сертификата", "отключена")
+	}
+	for k, v := range n.Extra {
+		add(k, v)
+	}
+	if err := node.Validate(n); err != nil {
+		ci.Skipped = err.Error()
+	}
+	return ci, nil
+}
+
+// ImportResult — итог вставки конфигов.
+type ImportResult struct {
+	Added      int      `json:"added"`
+	Existing   int      `json:"existing"`
+	Rejected   int      `json:"rejected"`
+	IDs        []string `json:"ids"`
+	Rejections []string `json:"rejections,omitempty"`
+}
+
+// Import добавляет серверы из текста: ссылки по строкам, base64-подписка или
+// одна ссылка. Добавленные вручную серверы закрепляются (не удаляются проверкой).
+func (a *App) Import(text string) ImportResult {
+	var res ImportResult
+	nodes := node.ExtractAll(text)
+	if len(nodes) == 0 { // одиночная ссылка нестандартного вида
+		if n, err := node.Parse(text); err == nil {
+			nodes = []node.Node{n}
+		}
+	}
+	// строки, которые похожи на ссылку, но не разобрались, — покажем причину
+	known := map[string]bool{}
+	for _, n := range nodes {
+		known[strings.TrimSpace(n.Raw)] = true
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || known[line] || !strings.Contains(line, "://") {
+			continue
+		}
+		if _, err := node.Parse(line); err != nil {
+			res.Rejected++
+			if len(res.Rejections) < 5 {
+				res.Rejections = append(res.Rejections, err.Error())
+			}
+		}
+	}
+	a.mu.Lock()
+	existing := map[string]*Row{}
+	for _, r := range a.rows {
+		existing[r.ID] = r
+	}
+	for _, n := range nodes {
+		if err := node.Validate(n); err != nil {
+			res.Rejected++
+			if len(res.Rejections) < 5 {
+				res.Rejections = append(res.Rejections, n.Label()+": "+err.Error())
+			}
+			continue
+		}
+		res.IDs = append(res.IDs, n.ID())
+		if r, ok := existing[n.ID()]; ok {
+			r.Pinned = true
+			res.Existing++
+			continue
+		}
+		r := &Row{node: n, Status: StatusUnknown, Pinned: true}
+		fill(r)
+		a.rows = append(a.rows, r)
+		existing[r.ID] = r
+		res.Added++
+	}
+	a.mu.Unlock()
+	a.save()
+	a.Logf("импорт: добавлено %d, уже было %d, отклонено %d", res.Added, res.Existing, res.Rejected)
+	return res
+}
+
+// Delete удаляет сервер из списка (линия на нём останавливается).
+func (a *App) Delete(id string) error {
+	a.mu.Lock()
+	r, ok := a.find(id)
+	running := ok && r.Running
+	a.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("сервер не найден")
+	}
+	if running {
+		if err := a.StopLine(id); err != nil {
+			return err
+		}
+	}
+	a.mu.Lock()
+	rows := a.rows[:0:0]
+	for _, x := range a.rows {
+		if x.ID != id {
+			rows = append(rows, x)
+		}
+	}
+	a.rows = rows
+	a.mu.Unlock()
+	a.save()
+	return nil
+}
+
+// CheckIDs проверяет только указанные серверы (например, только что вставленные).
+func (a *App) CheckIDs(ids []string) error {
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	a.mu.Lock()
+	var nodes []node.Node
+	for _, r := range a.rows {
+		if want[r.ID] {
+			nodes = append(nodes, r.node)
+		}
+	}
+	a.mu.Unlock()
+	if len(nodes) == 0 {
+		return fmt.Errorf("нет серверов для проверки")
+	}
+	ctx, err := a.begin(Checking, "проверка выбранных серверов")
+	if err != nil {
+		return err
+	}
+	go func() {
+		defer a.end()
+		a.checkPartial(ctx, nodes)
+	}()
+	return nil
+}
+
+// checkPartial проверяет часть серверов и обновляет только их строки.
+func (a *App) checkPartial(ctx context.Context, nodes []node.Node) {
+	a.setAct(Starting, "запуск ядра", 0, 0)
+	lab, err := a.newLab(nodes, 4)
+	if err != nil {
+		a.Logf("ядро: %v", err)
+		return
+	}
+	defer lab.Close()
+	to := time.Duration(a.TimeoutSec) * time.Second
+	a.setAct(Checking, "проверка выбранных серверов", 0, len(nodes))
+	results := lab.CheckAll(ctx, nodes, a.Concurrency, to, func(done, total int, _ engine.Result) {
+		a.setAct(Checking, "проверка выбранных серверов", done, total)
+	})
+	if ctx.Err() != nil {
+		return
+	}
+	a.mu.Lock()
+	for _, res := range results {
+		if r, ok := a.find(res.Node.ID()); ok {
+			r.Status = nextStatus(r.Status, res.Alive)
+			r.LatencyMs = res.Latency.Milliseconds()
+		}
+	}
+	a.mu.Unlock()
+	if a.DetectExit {
+		var alive []node.Node
+		for _, res := range results {
+			if res.Alive {
+				alive = append(alive, res.Node)
+			}
+		}
+		a.exitIPs(ctx, lab, alive, to)
+	}
+	a.save()
 }

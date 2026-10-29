@@ -12,7 +12,7 @@ import (
 )
 
 var schemeRe = regexp.MustCompile(`(?i)\b(?:ss|vless|vmess|trojan|socks|socks4|socks4a|socks5|socks5h|hysteria|hysteria2|hy2|tuic|wireguard|wg|ssh)://[^\s"'<>\x60,]+`)
-var httpLineRe = regexp.MustCompile(`(?i)^(?:https?)://[^\s/"'<>]+:\d{1,5}/?$`)
+var httpLineRe = regexp.MustCompile(`(?i)^https?://(?:[^\s/@]+@)?[^\s/:@]+:\d{1,5}/?(?:#\S*)?$`)
 
 // ExtractAll находит и разбирает все ссылки в произвольном тексте: список по
 // строкам, base64-подписка целиком, смесь. Битые ссылки молча пропускаются.
