@@ -13,7 +13,7 @@ import (
 func TestBuildConfigAllProtocols(t *testing.T) {
 	raws := []string{
 		"ss://2022-blake3-aes-256-gcm:YctPZ6U7xPGcUDq6gGh3gZXeHoUc9P4%2BmOcwM2Bp1Gs%3D@1.1.1.1:8388#a",
-		"vless://11111111-2222-3333-4444-555555555555@2.2.2.2:443?security=reality&sni=x.com&pbk=PUB&sid=ab&flow=xtls-rprx-vision&type=ws&path=/p&host=h.com",
+		"vless://11111111-2222-3333-4444-555555555555@2.2.2.2:443?security=reality&sni=x.com&pbk=rG7q1o7jgPdCBuHfFfWaotPq_EpqnpahrLjz04gRKu4&sid=ab&flow=xtls-rprx-vision&type=ws&path=/p&host=h.com",
 		"trojan://pw@3.3.3.3:443?sni=a.com",
 		"socks5://u:p@4.4.4.4:1080",
 		"socks4://5.5.5.5:1080",
@@ -21,7 +21,7 @@ func TestBuildConfigAllProtocols(t *testing.T) {
 		"hysteria2://auth@7.7.7.7:443?obfs=salamander&obfs-password=x",
 		"hysteria://8.8.8.8:443?auth=abc&upmbps=10&downmbps=50",
 		"tuic://11111111-2222-3333-4444-555555555555:pw@9.9.9.9:443?congestion_control=bbr",
-		"wireguard://PRIV@10.1.1.1:51820?publickey=PUB&address=10.0.0.2/32&reserved=1,2,3",
+		"wireguard://euVtUSO57OWmqYpiVGsiOvK5VH4lFjGJeZ6Rv64UHs0%3D@10.1.1.1:51820?publickey=H01g%2FDLY2x29jY7FeEi0LAPvyRWMdaL6aycx8fPvCGc%3D&address=10.0.0.2/32&reserved=1,2,3",
 		"ssh://root:pw@11.11.11.11:22",
 	}
 	var nodes []node.Node

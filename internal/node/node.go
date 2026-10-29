@@ -6,6 +6,7 @@ package node
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -93,4 +94,24 @@ func (n *Node) extra(k, v string) {
 		n.Extra = map[string]string{}
 	}
 	n.Extra[k] = v
+}
+
+// UnmarshalJSON читает и новый формат, и старый settings.json (где сервер был
+// только Shadowsocks и поле называлось Remarks): без proto значит ss.
+func (n *Node) UnmarshalJSON(b []byte) error {
+	type plain Node
+	aux := struct {
+		*plain
+		Remarks string `json:"Remarks"`
+	}{plain: (*plain)(n)}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	if n.Name == "" {
+		n.Name = aux.Remarks
+	}
+	if n.Proto == "" && n.Method != "" {
+		n.Proto = SS
+	}
+	return nil
 }

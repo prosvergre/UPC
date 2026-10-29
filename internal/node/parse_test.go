@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 )
 
@@ -93,5 +94,18 @@ func TestIDDistinguishesAccounts(t *testing.T) {
 	b, _ := Parse("trojan://bbb@h.com:443")
 	if a.ID() == b.ID() {
 		t.Fatal("разные аккаунты должны иметь разный ID")
+	}
+}
+
+func TestLegacySettingsJSON(t *testing.T) {
+	var n Node
+	err := json.Unmarshal([]byte(`{"Remarks":"old","Method":"aes-256-gcm","Password":"p","Host":"1.2.3.4","Port":8388,"Raw":"ss://x"}`), &n)
+	if err != nil || n.Proto != SS || n.Name != "old" || n.Host != "1.2.3.4" || n.Port != 8388 {
+		t.Fatalf("%+v %v", n, err)
+	}
+	b, _ := json.Marshal(n)
+	var m Node
+	if err := json.Unmarshal(b, &m); err != nil || m.ID() != n.ID() {
+		t.Fatalf("round trip: %+v %v", m, err)
 	}
 }

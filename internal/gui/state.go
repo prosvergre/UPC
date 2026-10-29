@@ -1,15 +1,17 @@
 package gui
 
 import (
+	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
-	"proxycheck/internal/checker"
+	"proxycheck/internal/engine"
 	"proxycheck/internal/localdns"
+	"proxycheck/internal/node"
 	"proxycheck/internal/relay"
 	"proxycheck/internal/settings"
-	"proxycheck/internal/ssuri"
 )
 
 // liveStatus — три состояния сервера вместо простого "жив/мёртв":
@@ -90,7 +92,7 @@ func statusFromString(s string, fallbackAlive bool) liveStatus {
 // вкладке "Закладки" (только помеченные bookmarked=true) — это единый
 // источник данных, вкладки просто по-разному его отображают/фильтруют.
 type rowState struct {
-	server  ssuri.Server
+	server  node.Node
 	status  liveStatus
 	latency time.Duration
 
@@ -132,6 +134,36 @@ type appState struct {
 
 	dnsResolver *localdns.Resolver
 	dnsServerID string
+
+	engCfg engine.Config
+}
+
+// newLab запускает ядро с серверами nodes для пакетной проверки.
+func (s *appState) newLab(nodes []node.Node, lanes int) (*engine.Lab, error) {
+	cfg, err := s.engineConfig()
+	if err != nil {
+		return nil, err
+	}
+	return engine.NewLab(cfg, nodes, lanes)
+}
+
+// engineConfig находит sing-box и готовит рабочий каталог.
+func (s *appState) engineConfig() (engine.Config, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.engCfg.Binary == "" {
+		bin, err := engine.FindBinary()
+		if err != nil {
+			return engine.Config{}, err
+		}
+		s.engCfg = engine.Config{
+			Binary:  bin,
+			WorkDir: filepath.Join(os.TempDir(), "proxycheck-sb"),
+			Logf:    log.Printf,
+		}
+		s.mgr.SetEngine(s.engCfg)
+	}
+	return s.engCfg, nil
 }
 
 func newAppState() *appState {
@@ -302,7 +334,7 @@ func (s *appState) loadRowsFromSettings(st settings.Settings) {
 // syncPool обновляет резервный пул менеджера всеми живыми серверами —
 // вызывать под уже захваченным s.mu.
 func (s *appState) syncPool() {
-	var pool []ssuri.Server
+	var pool []node.Node
 	for _, r := range s.rows {
 		if r.status == statusAlive {
 			pool = append(pool, r.server)
@@ -319,10 +351,10 @@ func (s *appState) rowsSnapshot() []*rowState {
 	return out
 }
 
-func (s *appState) selectedServers() []ssuri.Server {
+func (s *appState) selectedServers() []node.Node {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []ssuri.Server
+	var out []node.Node
 	for _, r := range s.rows {
 		if r.selected {
 			out = append(out, r.server)
@@ -333,10 +365,10 @@ func (s *appState) selectedServers() []ssuri.Server {
 
 // selectedBookmarkServers — то же самое, но только среди закладок
 // (используется вкладко-зависимой кнопкой замера скорости/перепроверки).
-func (s *appState) selectedBookmarkServers() []ssuri.Server {
+func (s *appState) selectedBookmarkServers() []node.Node {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []ssuri.Server
+	var out []node.Node
 	for _, r := range s.rows {
 		if r.bookmarked && r.selected {
 			out = append(out, r.server)
@@ -346,10 +378,10 @@ func (s *appState) selectedBookmarkServers() []ssuri.Server {
 }
 
 // bookmarkServers — все сервера из закладок (для перепроверки без выбора).
-func (s *appState) bookmarkServers() []ssuri.Server {
+func (s *appState) bookmarkServers() []node.Node {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []ssuri.Server
+	var out []node.Node
 	for _, r := range s.rows {
 		if r.bookmarked {
 			out = append(out, r.server)
@@ -361,10 +393,10 @@ func (s *appState) bookmarkServers() []ssuri.Server {
 // allServers возвращает все сервера, сейчас отображённые в таблице —
 // используется кнопкой "Перепроверить" (перечекать уже загруженный
 // список без повторной загрузки источников).
-func (s *appState) allServers() []ssuri.Server {
+func (s *appState) allServers() []node.Node {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]ssuri.Server, 0, len(s.rows))
+	out := make([]node.Node, 0, len(s.rows))
 	for _, r := range s.rows {
 		out = append(out, r.server)
 	}
@@ -375,7 +407,7 @@ func (s *appState) allServers() []ssuri.Server {
 // нужно ПОДМЕШАТЬ к свежесобранному списку из источников перед сканом
 // — так закладки всегда остаются актуальными (перепроверяются вместе
 // со всеми) и не "вымываются", даже если сервер пропал из источников.
-func (s *appState) bookmarkedServersForMerge() []ssuri.Server {
+func (s *appState) bookmarkedServersForMerge() []node.Node {
 	return s.bookmarkServers()
 }
 
@@ -394,9 +426,9 @@ func (s *appState) runningPortFor(serverID string) (port int, running bool) {
 	return 0, false
 }
 
-// findServerByID ищет сервер (ssuri.Server) по ID среди текущих строк
+// findServerByID ищет сервер (node.Node) по ID среди текущих строк
 // — используется при запуске локального DNS через конкретный сервер.
-func (s *appState) findServerByID(id string) (ssuri.Server, bool) {
+func (s *appState) findServerByID(id string) (node.Node, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, r := range s.rows {
@@ -404,7 +436,7 @@ func (s *appState) findServerByID(id string) (ssuri.Server, bool) {
 			return r.server, true
 		}
 	}
-	return ssuri.Server{}, false
+	return node.Node{}, false
 }
 
 // setFromResults принимает ПОЛНЫЙ список результатов проверки (и живых,
@@ -415,7 +447,7 @@ func (s *appState) findServerByID(id string) (ssuri.Server, bool) {
 // а не просто "мёртв", как у всех остальных мёртвых из массового скана,
 // которых мы по-прежнему не держим в таблице (иначе список из
 // публичных источников был бы завален шумом).
-func (s *appState) setFromResults(results []checker.Result) {
+func (s *appState) setFromResults(results []engine.Result) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -427,16 +459,16 @@ func (s *appState) setFromResults(results []checker.Result) {
 	rows := make([]*rowState, 0, len(results))
 	seen := make(map[string]bool, len(results))
 	for _, r := range results {
-		prev, hadPrev := prevByID[r.Server.ID()]
+		prev, hadPrev := prevByID[r.Node.ID()]
 		important := hadPrev && (prev.running || prev.bookmarked || prev.selected)
 
 		if !r.Alive && !important {
-			seen[r.Server.ID()] = true // просмотрен, но не нужен в таблице
+			seen[r.Node.ID()] = true // просмотрен, но не нужен в таблице
 			continue
 		}
 
 		row := &rowState{
-			server:  r.Server,
+			server:  r.Node,
 			latency: r.Latency,
 		}
 		prevStatus := statusUnknown
@@ -454,7 +486,7 @@ func (s *appState) setFromResults(results []checker.Result) {
 		}
 		row.status = nextStatus(prevStatus, r.Alive)
 		rows = append(rows, row)
-		seen[r.Server.ID()] = true
+		seen[r.Node.ID()] = true
 	}
 	// добавляем запущенные прокси и закладки, которых вообще не было в
 	// переданных результатах (например, метод не поддерживается и они

@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"proxycheck/internal/checker"
-	"proxycheck/internal/ssuri"
+	"proxycheck/internal/engine"
+	"proxycheck/internal/node"
 )
 
 func TestSpeedAndExitIPSurviveSaveLoadRoundTrip(t *testing.T) {
@@ -14,9 +14,9 @@ func TestSpeedAndExitIPSurviveSaveLoadRoundTrip(t *testing.T) {
 
 	s := newAppState()
 	s.settingsPath = path
-	srv := ssuri.Server{Host: "127.0.0.1", Port: 1, Method: "aes-256-gcm", Password: "x"}
+	srv := node.Node{Proto: node.SS, Host: "127.0.0.1", Port: 1, Method: "aes-256-gcm", Password: "x"}
 
-	s.setFromResults([]checker.Result{{Server: srv, Alive: true, Latency: 50 * time.Millisecond}})
+	s.setFromResults([]engine.Result{{Node: srv, Alive: true, Latency: 50 * time.Millisecond}})
 	rows := s.rowsSnapshot()
 	if len(rows) != 1 {
 		t.Fatalf("ожидалась 1 строка, получили %d", len(rows))
@@ -68,9 +68,9 @@ func TestFailedSpeedAttemptSurvivesRoundTrip(t *testing.T) {
 
 	s := newAppState()
 	s.settingsPath = path
-	srv := ssuri.Server{Host: "127.0.0.1", Port: 2, Method: "aes-256-gcm", Password: "y"}
+	srv := node.Node{Proto: node.SS, Host: "127.0.0.1", Port: 2, Method: "aes-256-gcm", Password: "y"}
 
-	s.setFromResults([]checker.Result{{Server: srv, Alive: true}})
+	s.setFromResults([]engine.Result{{Node: srv, Alive: true}})
 	rows := s.rowsSnapshot()
 	s.mu.Lock()
 	rows[0].speedAttempted = true // попытка была, но speedDone остаётся false — замер провалился

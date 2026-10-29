@@ -13,16 +13,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"proxycheck/internal/ssuri"
+	"proxycheck/internal/node"
 )
 
 // Profile — один сохранённый сервер-профиль.
 type Profile struct {
-	ID                int          `json:"id"`
-	Server            ssuri.Server `json:"server"`
-	LocalPort         int          `json:"local_port"`          // желаемый порт (может быть переназначен при занятости)
-	Enabled           bool         `json:"enabled"`             // поднимать ли прокси автоматически при старте программы
-	HealthIntervalSec int          `json:"health_interval_sec"` // 0 = использовать значение по умолчанию
+	ID                int       `json:"id"`
+	Server            node.Node `json:"server"`
+	LocalPort         int       `json:"local_port"`          // желаемый порт (может быть переназначен при занятости)
+	Enabled           bool      `json:"enabled"`             // поднимать ли прокси автоматически при старте программы
+	HealthIntervalSec int       `json:"health_interval_sec"` // 0 = использовать значение по умолчанию
 }
 
 // Settings — корневая структура файла настроек.
@@ -66,8 +66,8 @@ type Settings struct {
 // сканы и не теряются, даже если сервер перестал появляться в
 // источниках.
 type Bookmark struct {
-	Server  ssuri.Server `json:"server"`
-	Comment string       `json:"comment"`
+	Server  node.Node `json:"server"`
+	Comment string    `json:"comment"`
 }
 
 // ScanRow — сохранённая строка результата скана (сервер + был ли жив
@@ -75,13 +75,13 @@ type Bookmark struct {
 // состояния; при следующем запуске рекомендуется точечно
 // перепроверить хотя бы Enabled-профили).
 type ScanRow struct {
-	Server          ssuri.Server `json:"server"`
-	Alive           bool         `json:"alive"`            // оставлено для обратной совместимости со старыми settings.json
-	Status          string       `json:"status,omitempty"` // "alive" / "dead" / "died" / "" (неизвестно) — полная версия Alive, с учётом "умер"
-	LatencyMs       int64        `json:"latency_ms"`
-	Selected        bool         `json:"selected"`
-	ExitIP          string       `json:"exit_ip,omitempty"`
-	ExitIPAttempted bool         `json:"exit_ip_attempted,omitempty"`
+	Server          node.Node `json:"server"`
+	Alive           bool      `json:"alive"`            // оставлено для обратной совместимости со старыми settings.json
+	Status          string    `json:"status,omitempty"` // "alive" / "dead" / "died" / "" (неизвестно) — полная версия Alive, с учётом "умер"
+	LatencyMs       int64     `json:"latency_ms"`
+	Selected        bool      `json:"selected"`
+	ExitIP          string    `json:"exit_ip,omitempty"`
+	ExitIPAttempted bool      `json:"exit_ip_attempted,omitempty"`
 
 	// SpeedMbps/UlSpeedMbps — последний замеренный результат скорости
 	// (скачивание/отдача). Done=true значит замер удался (Mbps валиден);

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -126,4 +127,26 @@ func (l *Lab) checkURL() string {
 		return l.CheckURL
 	}
 	return DefaultTestURL
+}
+
+// ExitIPViaSocks определяет выходной IP через уже работающий локальный
+// SOCKS5-вход (например, активную линию), не поднимая отдельного ядра.
+func ExitIPViaSocks(ctx context.Context, socksAddr string, timeout time.Duration) (string, error) {
+	proxy, _ := url.Parse("socks5://" + socksAddr)
+	c := &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: http.ProxyURL(proxy), DisableKeepAlives: true}}
+	req, _ := http.NewRequestWithContext(ctx, "GET", ExitIPURL, nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if err != nil {
+		return "", err
+	}
+	ip := strings.TrimSpace(string(b))
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("сервис вернул не IP: %q", ip)
+	}
+	return ip, nil
 }

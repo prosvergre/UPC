@@ -3,50 +3,53 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
 
-	"proxycheck/internal/checker"
 	"proxycheck/internal/config"
+	"proxycheck/internal/engine"
+	"proxycheck/internal/node"
 	"proxycheck/internal/relay"
 	"proxycheck/internal/sources"
-	"proxycheck/internal/speedtest"
-	"proxycheck/internal/ssclient"
-	"proxycheck/internal/ssuri"
 )
+
+func engineConfig() (engine.Config, error) {
+	bin, err := engine.FindBinary()
+	if err != nil {
+		return engine.Config{}, err
+	}
+	return engine.Config{Binary: bin, WorkDir: filepath.Join(os.TempDir(), "proxycheck-sb")}, nil
+}
 
 // Run разбирает флаги и выполняет всю работу. args — обычно os.Args[1:].
 func Run(args []string) int {
 	fs := flag.NewFlagSet("proxycheck", flag.ExitOnError)
-	output := fs.String("o", "proxies.json", "путь к выходному конфигу (формат shadowsocks-rust)")
-	concurrency := fs.Int("c", 50, "число одновременных проверок (потоков); игнорируется при -sequential")
-	sequential := fs.Bool("sequential", false, "проверять сервера последовательно, а не параллельно")
+	output := fs.String("o", "proxies.txt", "выходной файл (.txt — ссылки по строкам, иначе JSON)")
+	concurrency := fs.Int("c", 50, "число одновременных проверок; игнорируется при -sequential")
+	sequential := fs.Bool("sequential", false, "проверять сервера последовательно")
 	timeoutSec := fs.Int("t", 5, "таймаут одной проверки, секунды")
-	localPort := fs.Int("local-port", 1080, "локальный порт в итоговом JSON-конфиге (поле local_port)")
 	extraSources := fs.String("sources", "", "доп. источники (raw-URL), через запятую")
 	noDefault := fs.Bool("no-default-sources", false, "не использовать встроенный список источников")
 	top := fs.Int("top", 0, "оставить только N самых быстрых серверов (0 = все рабочие)")
-	selectIDs := fs.String("select", "", "сохранить/использовать ТОЛЬКО эти сервера (host:port,host:port,...) — переопределяет -top")
+	selectIDs := fs.String("select", "", "оставить ТОЛЬКО эти сервера (host:port,...) — переопределяет -top")
 	quiet := fs.Bool("q", false, "не выводить прогресс, только итог")
 	listSources := fs.Bool("list-sources", false, "показать встроенный список источников и выйти")
-	listMethods := fs.Bool("list-methods", false, "показать поддерживаемые методы шифрования и выйти")
+	listProtos := fs.Bool("list-protocols", false, "показать поддерживаемые протоколы и выйти")
 
-	serve := fs.Bool("serve", false, "после проверки поднять локальные SOCKS5-прокси на отобранные сервера и работать демоном (Ctrl+C для выхода)")
-	servePortStart := fs.Int("serve-port-start", 1080, "первый локальный порт при -serve (дальше по возрастанию: 1080, 1081, ...)")
-	healthInterval := fs.Int("health-interval", 30, "интервал health-проверки активных прокси при -serve, секунды")
-	failThreshold := fs.Int("fail-threshold", 2, "сколько подряд неудачных проверок означают, что сервер мёртв (при -serve)")
+	serve := fs.Bool("serve", false, "после проверки поднять локальные входы (SOCKS5+HTTP) и работать демоном")
+	servePortStart := fs.Int("serve-port-start", 1080, "первый локальный порт при -serve")
+	healthInterval := fs.Int("health-interval", 30, "интервал health-проверки при -serve, секунды")
+	failThreshold := fs.Int("fail-threshold", 2, "сколько неудач подряд означают, что сервер мёртв (при -serve)")
 
-	doSpeedtest := fs.Bool("speedtest", false, "замерить скорость скачивания у отобранных серверов (через реальный SS-туннель)")
-	speedtestURL := fs.String("speedtest-url", "", "свой URL для замера скорости (по умолчанию — файл с speed.cloudflare.com)")
-
-	deepVerify := fs.Bool("deep-verify", true, "после TCP-проверки дополнительно подтверждать сервера реальным SS-подключением (медленнее, но не даёт ложно-живых)")
-
+	doSpeedtest := fs.Bool("speedtest", false, "замерить скорость скачивания у отобранных серверов")
 	fs.Parse(args)
 
 	if *listSources {
@@ -55,10 +58,8 @@ func Run(args []string) int {
 		}
 		return 0
 	}
-	if *listMethods {
-		for _, m := range ssclient.SupportedMethods() {
-			fmt.Println(m)
-		}
+	if *listProtos {
+		fmt.Println("ss (в т.ч. SS2022), vless (reality, ws, grpc, ...), vmess, trojan, socks4/5, http(s), hysteria, hysteria2, tuic, wireguard, ssh")
 		return 0
 	}
 
@@ -66,12 +67,8 @@ func Run(args []string) int {
 	if !*noDefault {
 		srcList = append(srcList, sources.Default...)
 	}
-	if *extraSources != "" {
-		for _, u := range strings.Split(*extraSources, ",") {
-			u = strings.TrimSpace(u)
-			if u == "" {
-				continue
-			}
+	for _, u := range strings.Split(*extraSources, ",") {
+		if u = strings.TrimSpace(u); u != "" {
 			srcList = append(srcList, sources.Source{Name: u, URL: u})
 		}
 	}
@@ -79,14 +76,13 @@ func Run(args []string) int {
 		fmt.Fprintln(os.Stderr, "нет ни одного источника (--no-default-sources без --sources)")
 		return 1
 	}
-
 	if !*quiet {
 		fmt.Printf("Загружаю %d источник(ов)...\n", len(srcList))
 	}
 	fetched := sources.FetchAll(srcList, 20*time.Second)
 
-	var all []ssuri.Server
-	seen := make(map[string]bool)
+	var all []node.Node
+	seen := map[string]bool{}
 	for _, fr := range fetched {
 		if fr.Err != nil {
 			if !*quiet {
@@ -94,14 +90,13 @@ func Run(args []string) int {
 			}
 			continue
 		}
-		found := ssuri.ExtractAll(fr.Body)
+		found := node.ExtractAll(fr.Body)
 		added := 0
 		for _, s := range found {
-			id := s.ID()
-			if seen[id] {
+			if seen[s.ID()] {
 				continue
 			}
-			seen[id] = true
+			seen[s.ID()] = true
 			all = append(all, s)
 			added++
 		}
@@ -109,57 +104,44 @@ func Run(args []string) int {
 			fmt.Printf("  [ok] %-28s %4d серверов (уникальных: %d)\n", fr.Source.Name, len(found), added)
 		}
 	}
-
 	if len(all) == 0 {
 		fmt.Fprintln(os.Stderr, "не удалось извлечь ни одного сервера из источников")
 		return 1
 	}
-
-	// отсеиваем сервера с методами шифрования, которые мы не умеем
-	// подключать — иначе они честно проходили бы TCP-проверку (порт
-	// открыт), но реально никогда не смогли бы установить соединение.
-	var supported []ssuri.Server
-	skippedByMethod := map[string]int{}
+	var valid []node.Node
 	for _, s := range all {
-		if ssclient.Supported(s.Method) {
-			supported = append(supported, s)
-		} else {
-			skippedByMethod[s.Method]++
+		if node.Validate(s) == nil {
+			valid = append(valid, s)
 		}
 	}
-	if len(skippedByMethod) > 0 && !*quiet {
-		fmt.Printf("Пропущено %d серверов с неподдерживаемыми методами шифрования:\n", len(all)-len(supported))
-		for m, n := range skippedByMethod {
-			fmt.Printf("  %-30s ×%d\n", m, n)
-		}
-		fmt.Printf("  (поддерживаются: %s)\n", strings.Join(ssclient.SupportedMethods(), ", "))
+	if !*quiet && len(valid) != len(all) {
+		fmt.Printf("Пропущено %d серверов с некорректными параметрами.\n", len(all)-len(valid))
 	}
-	all = supported
+	all = valid
 	if len(all) == 0 {
-		fmt.Fprintln(os.Stderr, "не осталось серверов с поддерживаемыми методами шифрования")
+		fmt.Fprintln(os.Stderr, "не осталось серверов с корректными параметрами")
 		return 1
 	}
 
-	checkConcurrency := *concurrency
+	cfg, err := engineConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	conc := *concurrency
 	if *sequential {
-		checkConcurrency = 1
+		conc = 1
 	}
 	if !*quiet {
-		mode := "параллельно"
-		if *sequential {
-			mode = "последовательно"
-		}
-		fmt.Printf("Всего уникальных серверов: %d. Проверяю (%s, таймаут: %ds)...\n",
-			len(all), mode, *timeoutSec)
+		fmt.Printf("Запускаю ядро, загружаю %d серверов...\n", len(all))
 	}
-
-	opts := checker.Options{
-		Concurrency: checkConcurrency,
-		Timeout:     time.Duration(*timeoutSec) * time.Second,
+	lab, err := engine.NewLab(cfg, all, 4)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ошибка ядра:", err)
+		return 1
 	}
-
 	lastPrint := time.Now()
-	results := checker.CheckAll(all, opts, func(done, total int, r checker.Result) {
+	results := lab.CheckAll(context.Background(), all, conc, time.Duration(*timeoutSec)*time.Second, func(done, total int, r engine.Result) {
 		if *quiet {
 			return
 		}
@@ -171,184 +153,115 @@ func Run(args []string) int {
 	if !*quiet {
 		fmt.Println()
 	}
-
-	var alive []checker.Result
+	var alive []engine.Result
 	for _, r := range results {
 		if r.Alive {
 			alive = append(alive, r)
 		}
 	}
 	sort.Slice(alive, func(i, j int) bool { return alive[i].Latency < alive[j].Latency })
-
-	if *deepVerify && len(alive) > 0 {
-		if !*quiet {
-			fmt.Printf("Глубокая проверка %d серверов (реальное SS-подключение)...\n", len(alive))
-		}
-		var candidates []ssuri.Server
-		for _, r := range alive {
-			candidates = append(candidates, r.Server)
-		}
-		lastPrint = time.Now()
-		deepResults := checker.DeepVerifyAll(candidates, opts, func(done, total int, r checker.Result) {
-			if *quiet {
-				return
-			}
-			if time.Since(lastPrint) > 200*time.Millisecond || done == total {
-				fmt.Printf("\r  глубокая проверка %d/%d...", done, total)
-				lastPrint = time.Now()
-			}
-		})
-		if !*quiet {
-			fmt.Println()
-		}
-		var deepAlive []checker.Result
-		for _, r := range deepResults {
-			if r.Alive {
-				deepAlive = append(deepAlive, r)
-			}
-		}
-		sort.Slice(deepAlive, func(i, j int) bool { return deepAlive[i].Latency < deepAlive[j].Latency })
-		if !*quiet {
-			fmt.Printf("Реально рабочих: %d из %d прошедших TCP.\n", len(deepAlive), len(alive))
-		}
-		alive = deepAlive
-	}
-
 	if !*quiet {
 		fmt.Printf("Рабочих серверов: %d из %d\n", len(alive), len(all))
 	}
 	if len(alive) == 0 {
+		lab.Close()
 		fmt.Fprintln(os.Stderr, "ни один сервер не прошёл проверку, дальше идти некуда")
 		return 1
 	}
 
-	// отбор: -select имеет приоритет над -top
-	var chosen []checker.Result
+	chosen := alive
 	if *selectIDs != "" {
-		wanted := make(map[string]bool)
+		wanted := map[string]bool{}
 		for _, id := range strings.Split(*selectIDs, ",") {
-			id = strings.TrimSpace(id)
-			if id != "" {
+			if id = strings.TrimSpace(id); id != "" {
 				wanted[id] = true
 			}
 		}
+		chosen = nil
 		for _, r := range alive {
-			if wanted[r.Server.ID()] {
+			if wanted[r.Node.Addr()] || wanted[r.Node.ID()] {
 				chosen = append(chosen, r)
 			}
 		}
 		if len(chosen) == 0 {
+			lab.Close()
 			fmt.Fprintln(os.Stderr, "ни один из -select не найден среди рабочих серверов")
 			return 1
 		}
-	} else {
-		chosen = alive
-		if *top > 0 && len(chosen) > *top {
-			chosen = chosen[:*top]
-		}
+	} else if *top > 0 && len(chosen) > *top {
+		chosen = chosen[:*top]
 	}
-
-	var chosenServers []ssuri.Server
+	var chosenNodes []node.Node
 	for _, r := range chosen {
-		chosenServers = append(chosenServers, r.Server)
+		chosenNodes = append(chosenNodes, r.Node)
 	}
 
 	if *doSpeedtest && !*serve {
 		if !*quiet {
 			fmt.Println("Замер скорости скачивания...")
 		}
-		runSpeedtests(chosenServers, *speedtestURL, time.Duration(*timeoutSec)*time.Second, *quiet)
+		for _, s := range chosenNodes {
+			down, _, derr, _ := lab.Speed(context.Background(), s, false, 20*time.Second)
+			if derr != nil {
+				fmt.Printf("  %-30s ошибка: %v\n", s.Label(), derr)
+				continue
+			}
+			fmt.Printf("  %-30s %.2f Мбит/с (%.1f МБ за %v)\n", s.Label(), down.Mbps,
+				float64(down.Bytes)/1_000_000, down.Duration.Round(10*time.Millisecond))
+		}
 	}
+	lab.Close()
 
-	cfg := config.FromServers(chosenServers, *localPort)
-	if err := config.WriteJSON(*output, cfg); err != nil {
+	if err := config.Write(*output, chosenNodes); err != nil {
 		fmt.Fprintf(os.Stderr, "не удалось записать %s: %v\n", *output, err)
 		return 1
 	}
 	if !*quiet {
-		fmt.Printf("Конфиг записан: %s (%d серверов)\n", *output, len(chosenServers))
+		fmt.Printf("Записано: %s (%d серверов)\n", *output, len(chosenNodes))
 		limit := 5
 		if len(chosen) < limit {
 			limit = len(chosen)
 		}
 		fmt.Printf("Топ-%d по задержке:\n", limit)
 		for i := 0; i < limit; i++ {
-			r := chosen[i]
-			name := r.Server.Remarks
-			if name == "" {
-				name = r.Server.ID()
-			}
-			fmt.Printf("  %2d. %-30s %v\n", i+1, name, r.Latency.Round(time.Millisecond))
+			fmt.Printf("  %2d. %-30s %v\n", i+1, chosen[i].Node.Label(), chosen[i].Latency.Round(time.Millisecond))
 		}
 	}
-
 	if !*serve {
 		return 0
 	}
-
-	return runServe(chosenServers, alive, *servePortStart, time.Duration(*healthInterval)*time.Second,
+	return runServe(cfg, chosenNodes, alive, *servePortStart, time.Duration(*healthInterval)*time.Second,
 		time.Duration(*timeoutSec)*time.Second, *failThreshold, *quiet)
 }
 
-// runSpeedtests качает тестовый файл через каждый сервер по очереди
-// (по одному временному локальному порту) и печатает результат.
-func runSpeedtests(servers []ssuri.Server, url string, timeout time.Duration, quiet bool) {
-	const tmpPort = 19999
-	mgr := relay.NewManager(nil, timeout)
-	for _, s := range servers {
-		_, err := mgr.Start(s, tmpPort)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %s: не удалось поднять локальный вход: %v\n", s.ID(), err)
-			continue
-		}
-		res, err := speedtest.Download(fmt.Sprintf("127.0.0.1:%d", tmpPort), url, 20*time.Second)
-		mgr.Stop(s.ID())
-		name := s.Remarks
-		if name == "" {
-			name = s.ID()
-		}
-		if err != nil {
-			fmt.Printf("  %-30s ошибка: %v\n", name, err)
-			continue
-		}
-		fmt.Printf("  %-30s %.2f Мбит/с (%.1f МБ за %v)\n", name, res.Mbps,
-			float64(res.Bytes)/1_000_000, res.Duration.Round(10*time.Millisecond))
-	}
-}
-
-// runServe поднимает по одному локальному SOCKS5-входу на каждый
-// выбранный сервер (последовательные локальные порты, начиная с
-// portStart), включает health-мониторинг с точечным failover из
-// полного пула alive-результатов последнего скана и блокируется до
-// Ctrl+C/SIGTERM.
-func runServe(chosen []ssuri.Server, allAlive []checker.Result, portStart int,
+// runServe поднимает по одному входу на выбранный сервер (все в одном процессе
+// sing-box), включает health-мониторинг с failover и блокируется до Ctrl+C.
+func runServe(cfg engine.Config, chosen []node.Node, allAlive []engine.Result, portStart int,
 	healthInterval, checkTimeout time.Duration, failThreshold int, quiet bool) int {
 
-	pool := make([]ssuri.Server, 0, len(allAlive))
+	pool := make([]node.Node, 0, len(allAlive))
 	for _, r := range allAlive {
-		pool = append(pool, r.Server)
+		pool = append(pool, r.Node)
 	}
-
 	mgr := relay.NewManager(pool, checkTimeout)
-	port := portStart
-	for _, s := range chosen {
-		ep, err := mgr.Start(s, port)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "не удалось запустить %s на порту %d: %v\n", s.ID(), port, err)
-			port++
+	mgr.Listen = "127.0.0.1"
+	mgr.SetEngine(cfg)
+
+	ports := make([]int, len(chosen))
+	for i := range ports {
+		ports[i] = portStart + i
+	}
+	eps, errs := mgr.StartMany(chosen, ports)
+	for i, s := range chosen {
+		if errs[i] != nil {
+			fmt.Fprintf(os.Stderr, "не удалось запустить %s: %v\n", s.Label(), errs[i])
 			continue
 		}
-		name := s.Remarks
-		if name == "" {
-			name = s.ID()
-		}
-		fmt.Printf("127.0.0.1:%-6d -> %s (%s)\n", ep.LocalPort, name, s.ID())
-		port++
+		fmt.Printf("127.0.0.1:%-6d -> %s\n", eps[i].LocalPort, s.Label())
 	}
 
 	stop := make(chan struct{})
 	go mgr.RunHealthLoop(healthInterval, checkTimeout, failThreshold, stop)
-
 	if !quiet {
 		go func() {
 			for ev := range mgr.Events() {
@@ -356,12 +269,10 @@ func runServe(chosen []ssuri.Server, allAlive []checker.Result, portStart int,
 			}
 		}()
 	}
-
 	fmt.Println("Демон запущен. Ctrl+C для остановки.")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
-
 	fmt.Println("\nОстанавливаюсь...")
 	close(stop)
 	mgr.StopAll()

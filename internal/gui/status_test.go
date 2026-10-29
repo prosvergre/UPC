@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"proxycheck/internal/checker"
-	"proxycheck/internal/ssuri"
+	"proxycheck/internal/engine"
+	"proxycheck/internal/node"
 )
 
 func TestNextStatusTransitions(t *testing.T) {
@@ -47,10 +47,10 @@ func TestStatusTextLabels(t *testing.T) {
 
 func TestSetFromResults_ImportantServerSurvivesAsDied(t *testing.T) {
 	s := newAppState()
-	srv := ssuri.Server{Host: "127.0.0.1", Port: 1, Method: "aes-256-gcm", Password: "x"}
+	srv := node.Node{Host: "127.0.0.1", Port: 1, Method: "aes-256-gcm", Password: "x"}
 
 	// сначала сервер был жив и отмечен галочкой ("важный")
-	s.setFromResults([]checker.Result{{Server: srv, Alive: true, Latency: 10 * time.Millisecond}})
+	s.setFromResults([]engine.Result{{Node: srv, Alive: true, Latency: 10 * time.Millisecond}})
 	rows := s.rowsSnapshot()
 	if len(rows) != 1 || rows[0].status != statusAlive {
 		t.Fatalf("после первого скана ожидался 1 живой сервер, получили %+v", rows)
@@ -60,7 +60,7 @@ func TestSetFromResults_ImportantServerSurvivesAsDied(t *testing.T) {
 	s.mu.Unlock()
 
 	// теперь тот же сервер не отвечает
-	s.setFromResults([]checker.Result{{Server: srv, Alive: false}})
+	s.setFromResults([]engine.Result{{Node: srv, Alive: false}})
 	rows = s.rowsSnapshot()
 	if len(rows) != 1 {
 		t.Fatalf("важный (отмеченный) сервер не должен пропадать из таблицы при смерти, строк: %d", len(rows))
@@ -72,11 +72,11 @@ func TestSetFromResults_ImportantServerSurvivesAsDied(t *testing.T) {
 
 func TestSetFromResults_UnimportantDeadServerDropped(t *testing.T) {
 	s := newAppState()
-	srv := ssuri.Server{Host: "127.0.0.1", Port: 2, Method: "aes-256-gcm", Password: "y"}
+	srv := node.Node{Host: "127.0.0.1", Port: 2, Method: "aes-256-gcm", Password: "y"}
 
 	// сервер из обычного массового скана, никогда не был отмечен,
 	// не в закладках, не запущен — просто мёртвый шум
-	s.setFromResults([]checker.Result{{Server: srv, Alive: false}})
+	s.setFromResults([]engine.Result{{Node: srv, Alive: false}})
 	rows := s.rowsSnapshot()
 	if len(rows) != 0 {
 		t.Fatalf("неважный мёртвый сервер должен быть отброшен, получили %d строк", len(rows))
@@ -105,27 +105,27 @@ func TestCompareHelpers(t *testing.T) {
 }
 
 func TestDisplayName(t *testing.T) {
-	withRemarks := &rowState{server: ssuri.Server{Remarks: "my-server", Host: "1.2.3.4", Port: 443}}
+	withRemarks := &rowState{server: node.Node{Name: "my-server", Host: "1.2.3.4", Port: 443}}
 	if displayName(withRemarks) != "my-server" {
 		t.Errorf("ожидался Remarks, получили %q", displayName(withRemarks))
 	}
-	withoutRemarks := &rowState{server: ssuri.Server{Host: "1.2.3.4", Port: 443}}
-	if displayName(withoutRemarks) != "1.2.3.4:443" {
+	withoutRemarks := &rowState{server: node.Node{Proto: node.SS, Host: "1.2.3.4", Port: 443}}
+	if displayName(withoutRemarks) != "ss 1.2.3.4:443" {
 		t.Errorf("ожидался ID как fallback, получили %q", displayName(withoutRemarks))
 	}
 }
 
 func TestSetFromResults_BookmarkedDeadServerKept(t *testing.T) {
 	s := newAppState()
-	srv := ssuri.Server{Host: "127.0.0.1", Port: 3, Method: "aes-256-gcm", Password: "z"}
+	srv := node.Node{Host: "127.0.0.1", Port: 3, Method: "aes-256-gcm", Password: "z"}
 
-	s.setFromResults([]checker.Result{{Server: srv, Alive: true}})
+	s.setFromResults([]engine.Result{{Node: srv, Alive: true}})
 	rows := s.rowsSnapshot()
 	s.mu.Lock()
 	rows[0].bookmarked = true
 	s.mu.Unlock()
 
-	s.setFromResults([]checker.Result{{Server: srv, Alive: false}})
+	s.setFromResults([]engine.Result{{Node: srv, Alive: false}})
 	rows = s.rowsSnapshot()
 	if len(rows) != 1 || rows[0].status != statusDied || !rows[0].bookmarked {
 		t.Fatalf("закладка должна оставаться в таблице со статусом 'умер': %+v", rows)

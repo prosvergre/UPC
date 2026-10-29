@@ -3,13 +3,14 @@
 package gui
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"proxycheck/internal/engine"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,16 +21,13 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 
-	"proxycheck/internal/checker"
 	"proxycheck/internal/config"
 	"proxycheck/internal/debugflag"
 	"proxycheck/internal/firewall"
 	"proxycheck/internal/localdns"
 	"proxycheck/internal/netutil"
+	"proxycheck/internal/node"
 	"proxycheck/internal/sources"
-	"proxycheck/internal/speedtest"
-	"proxycheck/internal/ssclient"
-	"proxycheck/internal/ssuri"
 )
 
 //go:embed assets/icon.png
@@ -167,8 +165,6 @@ func Run(opts RunOptions) {
 	sequentialCheck := widget.NewCheck("Последовательно", nil)
 	healthCheck := widget.NewCheck("Авто-мониторинг активных", nil)
 	healthCheck.SetChecked(true)
-	deepVerifyCheck := widget.NewCheck("Глубокая проверка (реальное подключение)", nil)
-	deepVerifyCheck.SetChecked(true)
 	exitIPCheck := widget.NewCheck("Определять выходной IP", nil)
 	exitIPCheck.SetChecked(state.detectExitIP)
 	exitIPCheck.OnChanged = func(v bool) {
@@ -208,171 +204,114 @@ func Run(opts RunOptions) {
 		}()
 	}
 
-	// runCheckPhase прогоняет TCP-скан (+ опционально глубокую проверку
-	// и определение IP) по уже готовому списку серверов.
-	runCheckPhase := func(servers []ssuri.Server) []ssuri.Server {
-		var supported []ssuri.Server
-		skippedByMethod := map[string]int{}
+	// runCheckPhase проверяет серверы ядром sing-box (один процесс на всю
+	// пачку): каждая проверка — реальный HTTPS-запрос через сервер. Затем
+	// (опционально) определяет выходной IP у живых.
+	runCheckPhase := func(servers []node.Node) []node.Node {
+		var supported []node.Node
+		skippedReasons := map[string]int{}
 		for _, s := range servers {
-			if ssclient.Supported(s.Method) {
-				supported = append(supported, s)
-			} else {
-				skippedByMethod[s.Method]++
+			if err := node.Validate(s); err != nil {
+				skippedReasons[s.Proto]++
+				continue
 			}
+			supported = append(supported, s)
 		}
-		if len(skippedByMethod) > 0 {
-			var parts []string
-			for m, n := range skippedByMethod {
-				parts = append(parts, fmt.Sprintf("%s×%d", m, n))
-			}
-			log.Printf("пропущено %d серверов с неподдерживаемыми методами: %s", len(servers)-len(supported), strings.Join(parts, ", "))
+		if len(skippedReasons) > 0 {
+			log.Printf("пропущено %d серверов с некорректными параметрами: %v", len(servers)-len(supported), skippedReasons)
 		}
-
-		if len(supported) == 0 {
+		finish := func(msg string) {
 			fyne.Do(func() {
-				status.SetText("Нет серверов с поддерживаемыми методами шифрования.")
+				status.SetText(msg)
 				progress.Hide()
 				runBtn.Enable()
 				recheckBtn.Enable()
 			})
+		}
+		if len(supported) == 0 {
+			finish("Нет серверов с корректными параметрами.")
 			return nil
 		}
-
-		fyne.Do(func() { status.SetText(fmt.Sprintf("Проверяю %d серверов...", len(supported))) })
-
 		conc := parseIntDefault(concurrencyEntry.Text, 50)
 		if sequentialCheck.Checked {
 			conc = 1
 		}
 		to := parseIntDefault(timeoutEntry.Text, 5)
-		copts := checker.Options{Concurrency: conc, Timeout: time.Duration(to) * time.Second}
 
-		results := checker.CheckAll(supported, copts, func(done, total int, r checker.Result) {
+		fyne.Do(func() {
+			status.SetText(fmt.Sprintf("Запускаю ядро и загружаю %d серверов...", len(supported)))
+		})
+		lab, err := state.newLab(supported, 8)
+		if err != nil {
+			log.Printf("ядро: %v", err)
+			finish("Ошибка ядра sing-box: " + err.Error())
+			return nil
+		}
+		defer lab.Close()
+
+		fyne.Do(func() {
+			status.SetText(fmt.Sprintf("Проверяю %d серверов (реальный HTTPS-запрос через каждый)...", len(supported)))
+		})
+		results := lab.CheckAll(context.Background(), supported, conc, time.Duration(to)*time.Second, func(done, total int, r engine.Result) {
 			fyne.Do(func() { progress.SetValue(float64(done) / float64(total)) })
 		})
-
-		sort.Slice(results, func(i, j int) bool {
+		sort.SliceStable(results, func(i, j int) bool {
 			if results[i].Alive != results[j].Alive {
 				return results[i].Alive
 			}
 			return results[i].Latency < results[j].Latency
 		})
-
-		aliveCount := 0
-		var aliveResults []checker.Result
+		var aliveFinal []engine.Result
 		for _, r := range results {
-			if r.Alive {
-				aliveCount++
-				aliveResults = append(aliveResults, r)
-			}
-		}
-
-		// finalResults — ПОЛНЫЙ список (и живых, и мёртвых), чтобы
-		// setFromResults могла сама решить, кого из мёртвых оставить в
-		// таблице как "умер" (важные — уже запущенные/в закладках/были
-		// отмечены), а кого отбросить как шум обычного массового скана.
-		finalResults := results
-		deepAliveCount := aliveCount
-
-		if deepVerifyCheck.Checked && len(aliveResults) > 0 {
-			fyne.Do(func() {
-				status.SetText(fmt.Sprintf("Глубокая проверка %d серверов (реальное подключение)...", len(aliveResults)))
-				progress.SetValue(0)
-			})
-
-			var candidates []ssuri.Server
-			for _, r := range aliveResults {
-				candidates = append(candidates, r.Server)
-			}
-			deepResults := checker.DeepVerifyAll(candidates, copts, func(done, total int, r checker.Result) {
-				fyne.Do(func() { progress.SetValue(float64(done) / float64(total)) })
-			})
-
-			deepByID := make(map[string]checker.Result, len(deepResults))
-			for _, dr := range deepResults {
-				deepByID[dr.Server.ID()] = dr
-			}
-			deepAliveCount = 0
-			merged := make([]checker.Result, 0, len(results))
-			for _, r := range results {
-				if dr, ok := deepByID[r.Server.ID()]; ok {
-					merged = append(merged, dr) // TCP прошёл, финальный вердикт — по глубокой проверке
-					if dr.Alive {
-						deepAliveCount++
-					}
-				} else {
-					merged = append(merged, r) // TCP не прошёл вообще, до глубокой проверки не дошёл
-				}
-			}
-			finalResults = merged
-		}
-
-		state.setFromResults(finalResults)
-		refreshTables()
-
-		// определение выходного IP — только для реально живых по итогу,
-		// не влияет на статус жив/мёртв/умер
-		var aliveFinal []checker.Result
-		for _, r := range finalResults {
 			if r.Alive {
 				aliveFinal = append(aliveFinal, r)
 			}
 		}
+		state.setFromResults(results)
+		refreshTables()
+
+		// выходной IP — только для живых; не влияет на статус жив/мёртв/умер
 		if exitIPCheck.Checked && len(aliveFinal) > 0 {
 			fyne.Do(func() {
 				status.SetText(fmt.Sprintf("Определяю выходной IP для %d серверов...", len(aliveFinal)))
 			})
 			var wg sync.WaitGroup
-			sem := make(chan struct{}, conc)
+			sem := make(chan struct{}, 8)
 			for _, r := range aliveFinal {
 				wg.Add(1)
 				sem <- struct{}{}
-				go func(srv ssuri.Server) {
+				go func(srv node.Node) {
 					defer wg.Done()
 					defer func() { <-sem }()
-					ip, err := ssclient.DetectExitIP(srv, time.Duration(to)*time.Second)
-					if err != nil {
-						if debugflag.Enabled() {
-							log.Printf("[exitip] %s: %v", srv.ID(), err)
-						}
-						for _, row := range state.rowsSnapshot() {
-							if row.server.ID() == srv.ID() {
-								state.mu.Lock()
-								row.exitIPAttempted = true
-								state.mu.Unlock()
+					ip, err := lab.ExitIP(context.Background(), srv, time.Duration(to)*time.Second)
+					if err != nil && debugflag.Enabled() {
+						log.Printf("[exitip] %s: %v", srv.Label(), err)
+					}
+					state.mu.Lock()
+					for _, row := range state.rows {
+						if row.server.ID() == srv.ID() {
+							row.exitIPAttempted = true
+							if err == nil {
+								row.exitIP = ip
+								row.exitIPDone = true
 							}
 						}
-						fyne.Do(refreshTables)
-						return // не критично для статуса жив/мёртв — просто не покажем IP для этого сервера
 					}
-					for _, row := range state.rowsSnapshot() {
-						if row.server.ID() == srv.ID() {
-							state.mu.Lock()
-							row.exitIP = ip
-							row.exitIPDone = true
-							row.exitIPAttempted = true
-							state.mu.Unlock()
-						}
-					}
+					state.mu.Unlock()
 					fyne.Do(refreshTables)
-				}(r.Server)
+				}(r.Node)
 			}
 			wg.Wait()
 		}
 
 		skippedNote := ""
-		if len(skippedByMethod) > 0 {
-			skippedNote = fmt.Sprintf(" (+ %d пропущено — неподдерживаемый метод)", len(servers)-len(supported))
+		if n := len(servers) - len(supported); n > 0 {
+			skippedNote = fmt.Sprintf(" (+ %d пропущено — некорректные параметры)", n)
 		}
-
 		fyne.Do(func() {
 			refreshTables()
 			progress.Hide()
-			if deepVerifyCheck.Checked {
-				status.SetText(fmt.Sprintf("Готово: %d реально рабочих из %d прошедших TCP (проверено %d)%s.", deepAliveCount, aliveCount, len(results), skippedNote))
-			} else {
-				status.SetText(fmt.Sprintf("Готово: %d рабочих из %d проверенных (только TCP)%s.", aliveCount, len(results), skippedNote))
-			}
+			status.SetText(fmt.Sprintf("Готово: %d рабочих из %d проверенных%s.", len(aliveFinal), len(results), skippedNote))
 			runBtn.Enable()
 			recheckBtn.Enable()
 			if healthCheck.Checked {
@@ -381,9 +320,9 @@ func Run(opts RunOptions) {
 		})
 		saveSoon()
 
-		var finalServers []ssuri.Server
+		var finalServers []node.Node
 		for _, r := range aliveFinal {
-			finalServers = append(finalServers, r.Server)
+			finalServers = append(finalServers, r.Node)
 		}
 		return finalServers
 	}
@@ -397,13 +336,13 @@ func Run(opts RunOptions) {
 
 		go func() {
 			fetched := sources.FetchAll(sources.Default, 20*time.Second)
-			var all []ssuri.Server
+			var all []node.Node
 			seen := map[string]bool{}
 			for _, fr := range fetched {
 				if fr.Err != nil {
 					continue
 				}
-				for _, s := range ssuri.ExtractAll(fr.Body) {
+				for _, s := range node.ExtractAll(fr.Body) {
 					if seen[s.ID()] {
 						continue
 					}
@@ -438,7 +377,7 @@ func Run(opts RunOptions) {
 	runBtn = widget.NewButton("Загрузить и проверить", func() { doScan() })
 
 	recheckBtn = widget.NewButton("Перепроверить", func() {
-		var servers []ssuri.Server
+		var servers []node.Node
 		if activeTab == 1 {
 			servers = state.bookmarkServers()
 		} else {
@@ -457,7 +396,7 @@ func Run(opts RunOptions) {
 	})
 
 	exportFunc := func(onlySelected bool) {
-		var srvs []ssuri.Server
+		var srvs []node.Node
 		if onlySelected {
 			srvs = state.selectedServers()
 		} else {
@@ -476,15 +415,14 @@ func Run(opts RunOptions) {
 				return
 			}
 			defer uc.Close()
-			cfg := config.FromServers(srvs, 1080)
 			path := uc.URI().Path()
-			if err := config.WriteJSON(path, cfg); err != nil {
+			if err := config.Write(path, srvs); err != nil {
 				dialog.ShowError(err, w)
 				return
 			}
 			dialog.ShowInformation("Готово", fmt.Sprintf("Сохранено: %s (%d серверов)", path, len(srvs)), w)
 		}, w)
-		saveDialog.SetFileName("proxies.json")
+		saveDialog.SetFileName("proxies.txt")
 		saveDialog.Show()
 	}
 	exportAllBtn = widget.NewButton("Экспорт всех рабочих", func() { exportFunc(false) })
@@ -492,21 +430,30 @@ func Run(opts RunOptions) {
 
 	// runSpeedtestOn — общая логика замера download+upload скорости для
 	// списка серверов (используется и основной вкладкой, и закладками).
-	runSpeedtestOn := func(servers []ssuri.Server) {
+	runSpeedtestOn := func(servers []node.Node) {
 		speedtestBtn.Disable()
 		status.SetText("Замер скорости...")
 		go func() {
-			const tmpPort = 19999
 			to := parseIntDefault(timeoutEntry.Text, 5)
+			endMsg := func(m string) {
+				fyne.Do(func() {
+					status.SetText(m)
+					speedtestBtn.Enable()
+				})
+			}
+			// одна линия: замеры идут строго по очереди, чтобы серверы не
+			// мешали друг другу полосой канала — иначе числа плавают
+			lab, err := state.newLab(servers, 1)
+			if err != nil {
+				endMsg("Ошибка ядра sing-box: " + err.Error())
+				return
+			}
+			defer lab.Close()
 			for _, srv := range servers {
-				// быстрая проверка живости перед замером — если сервер
-				// за время между сканами успел умереть, нет смысла
-				// поднимать endpoint и ждать таймаута скачивания; сразу
-				// обновляем статус в таблице (жив -> умер) и переходим
-				// к следующему серверу
-				if _, err := ssclient.VerifyHandshake(srv, time.Duration(to)*time.Second); err != nil {
+				// предпроверка живости: сервер мог умереть между сканами
+				if _, err := lab.Delay(context.Background(), srv, engine.DefaultTestURL, time.Duration(to)*time.Second); err != nil {
 					if debugflag.Enabled() {
-						log.Printf("[speedtest] %s: предпроверка не прошла, пропускаю: %v", srv.ID(), err)
+						log.Printf("[speedtest] %s: предпроверка не прошла, пропускаю: %v", srv.Label(), err)
 					}
 					fyne.Do(func() {
 						for _, r := range state.rowsSnapshot() {
@@ -518,55 +465,24 @@ func Run(opts RunOptions) {
 							}
 						}
 						refreshTables()
-						status.SetText(fmt.Sprintf("%s: перестал отвечать, замер скорости пропущен.", srv.ID()))
+						status.SetText(fmt.Sprintf("%s: перестал отвечать, замер скорости пропущен.", srv.Label()))
 					})
 					saveSoon()
 					continue
 				}
-
-				var localPort int
-				var derr error
-
-				if p, running := state.runningPortFor(srv.ID()); running {
-					localPort = p
-				} else {
-					ep, err := state.mgr.Start(srv, tmpPort)
-					if err != nil {
-						derr = err
-					} else {
-						localPort = ep.LocalPort
-					}
-				}
-
-				var dlMbps, ulMbps float64
-				var ulErr error
-				if derr == nil {
-					res, e := speedtest.Download(fmt.Sprintf("127.0.0.1:%d", localPort), "", 20*time.Second)
-					derr = e
-					dlMbps = res.Mbps
-
-					if derr == nil {
-						ures, ue := speedtest.Upload(fmt.Sprintf("127.0.0.1:%d", localPort), "", 0, 20*time.Second)
-						ulErr = ue
-						ulMbps = ures.Mbps
-					}
-
-					if _, running := state.runningPortFor(srv.ID()); !running {
-						state.mgr.Stop(srv.ID())
-					}
-				}
-
+				fyne.Do(func() { status.SetText(fmt.Sprintf("Замер скорости: %s...", srv.Label())) })
+				down, up, derr, ulErr := lab.Speed(context.Background(), srv, true, 20*time.Second)
 				fyne.Do(func() {
 					for _, r := range state.rowsSnapshot() {
 						if r.server.ID() == srv.ID() {
 							state.mu.Lock()
 							r.speedAttempted = true
 							if derr == nil {
-								r.speedMbps = dlMbps
+								r.speedMbps = down.Mbps
 								r.speedDone = true
 								r.ulSpeedAttempted = true
 								if ulErr == nil {
-									r.ulSpeedMbps = ulMbps
+									r.ulSpeedMbps = up.Mbps
 									r.ulSpeedDone = true
 								}
 							}
@@ -575,20 +491,17 @@ func Run(opts RunOptions) {
 					}
 					refreshTables()
 					if derr != nil {
-						status.SetText(fmt.Sprintf("%s: ошибка замера скорости: %v", srv.ID(), derr))
+						status.SetText(fmt.Sprintf("%s: ошибка замера скорости: %v", srv.Label(), derr))
 					}
 				})
 				saveSoon()
 			}
-			fyne.Do(func() {
-				status.SetText("Замер скорости завершён.")
-				speedtestBtn.Enable()
-			})
+			endMsg("Замер скорости завершён.")
 		}()
 	}
 
 	speedtestBtn = widget.NewButton("Замер скорости отмеченных ✓", func() {
-		var servers []ssuri.Server
+		var servers []node.Node
 		if activeTab == 1 {
 			servers = state.selectedBookmarkServers()
 		} else {
@@ -602,7 +515,7 @@ func Run(opts RunOptions) {
 	})
 
 	recheckSpeedBtn = widget.NewButton("Перепроверить и измерить скорость", func() {
-		var servers []ssuri.Server
+		var servers []node.Node
 		if activeTab == 1 {
 			servers = state.bookmarkServers()
 		} else {
@@ -675,16 +588,25 @@ func Run(opts RunOptions) {
 	// сохранённых профилей на запуске программы (выходной IP мог
 	// поменяться с прошлой сессии, поэтому обновляем заново, а не
 	// полагаемся на значение из settings.json).
-	detectExitIPFor := func(srv ssuri.Server) {
+	detectExitIPFor := func(srv node.Node) {
 		if !exitIPCheck.Checked {
 			return
 		}
 		go func() {
 			to := parseIntDefault(timeoutEntry.Text, 5)
-			ip, err := ssclient.DetectExitIP(srv, time.Duration(to)*time.Second)
+			var ip string
+			var err error
+			if p, running := state.runningPortFor(srv.ID()); running {
+				ip, err = engine.ExitIPViaSocks(context.Background(), fmt.Sprintf("127.0.0.1:%d", p), time.Duration(to)*time.Second)
+			} else if lab, lerr := state.newLab([]node.Node{srv}, 1); lerr != nil {
+				err = lerr
+			} else {
+				ip, err = lab.ExitIP(context.Background(), srv, time.Duration(to)*time.Second)
+				lab.Close()
+			}
 			if err != nil {
 				if debugflag.Enabled() {
-					log.Printf("[exitip] %s: %v", srv.ID(), err)
+					log.Printf("[exitip] %s: %v", srv.Label(), err)
 				}
 				for _, row := range state.rowsSnapshot() {
 					if row.server.ID() == srv.ID() {
@@ -710,7 +632,7 @@ func Run(opts RunOptions) {
 		}()
 	}
 
-	toggleDNS := func(srv ssuri.Server) {
+	toggleDNS := func(srv node.Node) {
 		state.mu.Lock()
 		current := state.dnsServerID
 		state.mu.Unlock()
@@ -737,7 +659,14 @@ func Run(opts RunOptions) {
 			state.mu.Unlock()
 
 			to := parseIntDefault(timeoutEntry.Text, 5)
-			resolver, err := localdns.Start("127.0.0.1:53", srv, time.Duration(to)*time.Second)
+			port, running := state.runningPortFor(srv.ID())
+			if !running {
+				fyne.Do(func() {
+					status.SetText("Для локального DNS сначала запустите этот прокси.")
+				})
+				return
+			}
+			resolver, err := localdns.Start("127.0.0.1:53", fmt.Sprintf("127.0.0.1:%d", port), srv, time.Duration(to)*time.Second)
 			if err != nil {
 				// именно то поведение, которое просили: не падаем и не
 				// уходим в ошибку, просто сообщаем и продолжаем работать
@@ -876,7 +805,7 @@ func Run(opts RunOptions) {
 				}
 			case 1:
 				lbl.Show()
-				name := r.server.Remarks
+				name := r.server.Name
 				if name == "" {
 					name = r.server.ID()
 				}
@@ -1116,7 +1045,7 @@ func Run(opts RunOptions) {
 				}
 			case 1:
 				lbl.Show()
-				name := r.server.Remarks
+				name := r.server.Name
 				if name == "" {
 					name = r.server.ID()
 				}
@@ -1231,7 +1160,7 @@ func Run(opts RunOptions) {
 		widget.NewLabel("Стартовый порт:"), container.NewGridWrap(fyne.NewSize(60, 34), startPortEntry),
 	)
 	checksRow := container.NewHBox(
-		sequentialCheck, healthCheck, deepVerifyCheck, exitIPCheck, startMinimizedCheck, runBtn, recheckBtn,
+		sequentialCheck, healthCheck, exitIPCheck, startMinimizedCheck, runBtn, recheckBtn,
 	)
 	actionsRow := container.NewHBox(exportAllBtn, exportSelectedBtn, speedtestBtn, recheckSpeedBtn, stopAllBtn, minimizeBtn, quitBtn)
 
@@ -1349,7 +1278,7 @@ func Run(opts RunOptions) {
 				// запущенные, в закладках, отмеченные галочкой — статус
 				// корректно перейдёт в "умер", если сервер, который был
 				// жив, перестал отвечать
-				var important []ssuri.Server
+				var important []node.Node
 				seenImportant := map[string]bool{}
 				for _, r := range state.rowsSnapshot() {
 					if r.running || r.bookmarked || r.selected {
@@ -1363,32 +1292,26 @@ func Run(opts RunOptions) {
 					fyne.Do(func() {
 						status.SetText(fmt.Sprintf("Интернет есть. Перепроверяю %d сохранённых серверов...", len(important)))
 					})
-					var wg sync.WaitGroup
-					sem := make(chan struct{}, 20)
-					for _, srv := range important {
-						wg.Add(1)
-						sem <- struct{}{}
-						go func(srv ssuri.Server) {
-							defer wg.Done()
-							defer func() { <-sem }()
-							_, verr := ssclient.VerifyHandshake(srv, time.Duration(to)*time.Second)
-							aliveNow := verr == nil
+					if lab, lerr := state.newLab(important, 4); lerr != nil {
+						log.Printf("[startup-recheck] ядро: %v", lerr)
+					} else {
+						res := lab.CheckAll(context.Background(), important, 20, time.Duration(to)*time.Second, nil)
+						lab.Close()
+						for _, r := range res {
 							for _, row := range state.rowsSnapshot() {
-								if row.server.ID() == srv.ID() {
+								if row.server.ID() == r.Node.ID() {
 									state.mu.Lock()
-									row.status = nextStatus(row.status, aliveNow)
+									row.status = nextStatus(row.status, r.Alive)
 									state.mu.Unlock()
 								}
 							}
-							if aliveNow {
-								detectExitIPFor(srv)
+							if r.Alive {
+								detectExitIPFor(r.Node)
 							} else if debugflag.Enabled() {
-								log.Printf("[startup-recheck] %s: %v", srv.ID(), verr)
+								log.Printf("[startup-recheck] %s: %v", r.Node.Label(), r.Err)
 							}
-							fyne.Do(refreshTables)
-						}(srv)
+						}
 					}
-					wg.Wait()
 					saveSoon()
 				}
 			}
@@ -1472,10 +1395,10 @@ func checkInternet(timeout time.Duration) bool {
 // сортировке по столбцу "Имя", чтобы сортировка совпадала с тем, что
 // реально видно в таблице.
 func displayName(r *rowState) string {
-	if r.server.Remarks != "" {
-		return r.server.Remarks
+	if r.server.Name != "" {
+		return r.server.Name
 	}
-	return r.server.ID()
+	return r.server.Label()
 }
 
 func cmpStrings(a, b string) int {
