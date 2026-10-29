@@ -115,3 +115,50 @@ func TestHysteria2PinIsNotPassedAsPublicKeyHash(t *testing.T) {
 		t.Fatal("pin нельзя передавать как certificate_public_key_sha256")
 	}
 }
+
+func TestExtrasUotMuxJSON(t *testing.T) {
+	n, _ := node.Parse("ss://YWVzLTI1Ni1nY206cHc=@1.1.1.1:8388")
+	n.Extra = map[string]string{"uot": "1", "mux": "h2mux", "mux_padding": "1", "outbound_json": `{"tcp_fast_open":true,"tag":"hack"}`}
+	b, skipped, err := BuildConfig(Spec{Nodes: []node.Node{n}, Lines: []Line{{Port: 1080, NodeID: n.ID()}}})
+	if err != nil || len(skipped) != 0 {
+		t.Fatal(err, skipped)
+	}
+	s := string(b)
+	for _, want := range []string{`"udp_over_tcp": true`, `"protocol": "h2mux"`, `"padding": true`, `"tcp_fast_open": true`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("нет %s", want)
+		}
+	}
+	if strings.Contains(s, `"hack"`) {
+		t.Error("тег переопределять нельзя")
+	}
+}
+
+func TestRealSingboxCheckExtras(t *testing.T) {
+	bin := os.Getenv("SINGBOX_BIN")
+	if bin == "" {
+		t.Skip("SINGBOX_BIN не задан")
+	}
+	var nodes []node.Node
+	for _, r := range []string{
+		"ss://YWVzLTI1Ni1nY206cHc=@1.1.1.1:8388",
+		"trojan://pw@3.3.3.3:443?sni=a.com",
+		"vless://11111111-2222-3333-4444-555555555555@2.2.2.3:443?security=tls&sni=h.com",
+	} {
+		n, _ := node.Parse(r)
+		n.Extra = map[string]string{"mux": "smux", "mux_padding": "1", "mux_max_streams": "8", "outbound_json": `{"tcp_fast_open":true}`}
+		if n.Proto == node.SS {
+			n.Extra["uot"] = "1"
+		}
+		nodes = append(nodes, n)
+	}
+	b, skipped, err := BuildConfig(Spec{Nodes: nodes, Lines: []Line{{Port: 21081, NodeID: nodes[0].ID()}}})
+	if err != nil || len(skipped) != 0 {
+		t.Fatal(err, skipped)
+	}
+	p := filepath.Join(t.TempDir(), "c.json")
+	os.WriteFile(p, b, 0o600)
+	if out, err := exec.Command(bin, "check", "-c", p).CombinedOutput(); err != nil {
+		t.Fatalf("sing-box check: %v\n%s", err, out)
+	}
+}

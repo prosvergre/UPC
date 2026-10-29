@@ -681,7 +681,7 @@ func Run(opts RunOptions) {
 			state.dnsServerID = srv.ID()
 			state.mu.Unlock()
 			fyne.Do(func() {
-				status.SetText(fmt.Sprintf("Локальный DNS запущен через %s.", srv.ID()))
+				status.SetText(fmt.Sprintf("Локальный DNS запущен через %s.", srv.Label()))
 				refreshTables()
 			})
 		}()
@@ -696,9 +696,9 @@ func Run(opts RunOptions) {
 		case 1:
 			return cmpStrings(displayName(a), displayName(b))
 		case 2:
-			return cmpStrings(a.server.ID(), b.server.ID())
+			return cmpStrings(a.server.Addr(), b.server.Addr())
 		case 3:
-			return cmpStrings(a.server.Method, b.server.Method)
+			return cmpStrings(a.server.Summary(), b.server.Summary())
 		case 4:
 			return cmpInt(int(a.status), int(b.status))
 		case 5:
@@ -807,15 +807,15 @@ func Run(opts RunOptions) {
 				lbl.Show()
 				name := r.server.Name
 				if name == "" {
-					name = r.server.ID()
+					name = r.server.Label()
 				}
 				lbl.SetText(name)
 			case 2:
 				lbl.Show()
-				lbl.SetText(r.server.ID())
+				lbl.SetText(r.server.Addr())
 			case 3:
 				lbl.Show()
-				lbl.SetText(r.server.Method)
+				lbl.SetText(r.server.Summary())
 			case 4:
 				lbl.Show()
 				lbl.SetText(r.status.text())
@@ -961,7 +961,7 @@ func Run(opts RunOptions) {
 		case 1:
 			return cmpStrings(displayName(a), displayName(b))
 		case 2:
-			return cmpStrings(a.server.ID(), b.server.ID())
+			return cmpStrings(a.server.Addr(), b.server.Addr())
 		case 4:
 			return cmpInt(int(a.status), int(b.status))
 		case 5:
@@ -1047,12 +1047,12 @@ func Run(opts RunOptions) {
 				lbl.Show()
 				name := r.server.Name
 				if name == "" {
-					name = r.server.ID()
+					name = r.server.Label()
 				}
 				lbl.SetText(name)
 			case 2:
 				lbl.Show()
-				lbl.SetText(r.server.ID())
+				lbl.SetText(r.server.Addr())
 			case 3:
 				entry.Show()
 				entry.OnChanged = nil

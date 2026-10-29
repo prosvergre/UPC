@@ -87,7 +87,7 @@ textarea{font:12px ui-monospace,Consolas,monospace;min-height:110px;resize:verti
       <h2>Ввод параметров</h2>
       <div class="form"><label class="l">Протокол</label><select id="mProto"></select></div>
       <div class="form" id="mForm" style="margin-top:8px"></div>
-      <div class="row" style="margin-top:10px"><button id="mAdd">Добавить</button><button id="mAddCheck">Добавить и проверить</button><span id="mRes"></span></div>
+      <div class="row" style="margin-top:10px"><button id="mAdd">Добавить</button><button id="mAddCheck">Добавить и проверить</button><button id="mCancelEdit" style="display:none">Отменить правку</button><span id="mRes"></span></div>
     </div>
     <div>
       <h2>Вставка из буфера обмена</h2>
@@ -217,7 +217,7 @@ function openMenu(id,x,y){
   const r=rowsById[id];if(!r)return;
   const items=[];
   if(r.running)items.push(['Остановить линию','stop']);else if(r.status==='alive')items.push(['Запустить линию','start']);
-  items.push(['Проверить','check'],['Замерить скорость','speed'],'-',['Конфиг…','cfg'],['Копировать ссылку','copy'],'-',['Удалить из списка','del']);
+  items.push(['Проверить','check'],['Замерить скорость','speed'],'-',['Редактировать…','edit'],['Конфиг…','cfg'],['Копировать ссылку','copy'],'-',['Удалить из списка','del']);
   $('ctx').innerHTML=items.map(i=>i==='-'?'<hr>':`<div data-a="${i[1]}" class="${i[1]==='del'?'del':''}">${i[0]}</div>`).join('');
   const m=$('ctx');m.style.display='block';
   m.style.left=Math.min(x,innerWidth-m.offsetWidth-6)+'px';m.style.top=Math.min(y,innerHeight-m.offsetHeight-6)+'px';
@@ -235,6 +235,7 @@ $('ctx').onclick=async e=>{
     if(a==='stop')await api('DELETE','/api/line?id='+encodeURIComponent(id));
     if(a==='check')await api('POST','/api/check',{ids:[id]});
     if(a==='speed')await api('POST','/api/speed',{ids:[id]});
+    if(a==='edit')await openEdit(id);
     if(a==='cfg')await openCfg(id);
     if(a==='copy'){const c=await api('GET','/api/config?id='+encodeURIComponent(id));
       if(!await copyText(c.link))await openCfg(id)}
@@ -303,7 +304,7 @@ const F=(k,l,t='text',o)=>({k,l,t,o});
 const TRANSPORT=[F('network','Транспорт','select',NET),F('path','Путь (path)'),F('host_header','Host'),F('service_name','Служба gRPC')];
 const TLS=[F('security','Безопасность','select',SEC),F('sni','SNI'),F('alpn','ALPN (через запятую)'),F('fingerprint','uTLS fingerprint','select',FP.map(x=>[x,x||'—'])),F('insecure','Не проверять сертификат','check'),F('public_key','Reality public key'),F('short_id','Reality short id')];
 const PROTOS={
- ss:{n:'Shadowsocks',f:[F('method','Шифр','select',SSM.map(x=>[x,x])),F('password','Пароль','password'),F('plugin','Плагин (name;opts)')]},
+ ss:{n:'Shadowsocks',f:[F('method','Шифрование','select',SSM.map(x=>[x,x])),F('password','Пароль','password'),F('x:plugin_name','Плагин','select',[['','—'],['obfs-local','obfs-local (simple-obfs)'],['v2ray-plugin','v2ray-plugin']]),F('x:plugin_args','Аргументы плагина'),F('x:uot','UoT (UDP over TCP)','check')]},
  vless:{n:'VLESS',f:[F('uuid','UUID'),F('flow','Flow','select',[['','—'],['xtls-rprx-vision','xtls-rprx-vision']]),...TRANSPORT,...TLS]},
  vmess:{n:'VMess',f:[F('uuid','UUID'),F('alter_id','AlterID','number'),F('method','Шифрование','select',[['auto','auto'],['aes-128-gcm','aes-128-gcm'],['chacha20-poly1305','chacha20-poly1305'],['none','none'],['zero','zero']]),...TRANSPORT,...TLS]},
  trojan:{n:'Trojan',f:[F('password','Пароль','password'),...TRANSPORT,...TLS]},
@@ -315,6 +316,9 @@ const PROTOS={
  wireguard:{n:'WireGuard',f:[F('x:private_key','Private key','password'),F('x:public_key','Public key пира'),F('x:pre_shared_key','Pre-shared key'),F('x:address','Адрес (10.0.0.2/32)'),F('x:reserved','Reserved (1,2,3)'),F('x:mtu','MTU','number')]},
  ssh:{n:'SSH',f:[F('username','Пользователь'),F('password','Пароль','password'),F('x:private_key','Приватный ключ','area')]}
 };
+const MUX=[F('x:mux','Мультиплексирование','select',[['','по умолчанию (выкл.)'],['none','выкл.'],['smux','smux'],['yamux','yamux'],['h2mux','h2mux']]),F('x:mux_padding','Padding мультиплекса','check'),F('x:mux_max_streams','Макс. потоков мультиплекса','number')];
+const ADV=[F('x:outbound_json','Доп. настройки outbound (JSON)','area')];
+for(const k of Object.keys(PROTOS)){if(['ss','vless','vmess','trojan'].includes(k))PROTOS[k].f.push(...MUX);PROTOS[k].f.push(...ADV)}
 $('mProto').innerHTML=Object.entries(PROTOS).map(([k,v])=>`<option value="${k}">${v.n}</option>`).join('');
 function buildForm(){
   const p=PROTOS[$('mProto').value];
@@ -336,22 +340,54 @@ function collect(){
   for(const f of all){
     const el=$('f_'+f.k.replace(':','_'));if(!el)continue;
     let v=f.t==='check'?el.checked:el.value.trim();
-    if(f.k.startsWith('x:')){if(v!==''&&v!==false)n.extra[f.k.slice(2)]=String(v);continue}
+    if(f.k.startsWith('x:')){if(v!==''&&v!==false)n.extra[f.k.slice(2)]=(v===true?'1':String(v));continue}
     if(['port','alter_id','version'].includes(f.k))v=parseInt(v||'0',10);
     if(f.k==='alpn')v=v?v.split(',').map(x=>x.trim()).filter(Boolean):[];
     n[f.k]=v;
   }
+  if(n.extra.plugin_name){n.plugin=n.extra.plugin_name+(n.extra.plugin_args?';'+n.extra.plugin_args:'')}
+  delete n.extra.plugin_name;delete n.extra.plugin_args;
+  if(editId)n.replace_id=editId;
   return n;
+}
+let editId=null;
+function setEdit(id){
+  editId=id;
+  $('mAdd').textContent=id?'Сохранить':'Добавить';
+  $('mAddCheck').textContent=id?'Сохранить и проверить':'Добавить и проверить';
+  $('mCancelEdit').style.display=id?'':'none';
+}
+function fillForm(n){
+  $('mProto').value=n.proto;buildForm();
+  const set=(k,v)=>{const el=$('f_'+k.replace(':','_'));if(!el)return;if(el.type==='checkbox')el.checked=!!v;else el.value=v==null?'':v};
+  const all=[F('name'),F('host'),F('port'),...PROTOS[n.proto].f];
+  const ex=n.extra||{};
+  let pn='',pa='';if(n.plugin){const i=n.plugin.indexOf(';');pn=i<0?n.plugin:n.plugin.slice(0,i);pa=i<0?'':n.plugin.slice(i+1)}
+  for(const f of all){
+    if(f.k.startsWith('x:')){
+      if(f.k==='x:plugin_name')set(f.k,pn);else if(f.k==='x:plugin_args')set(f.k,pa);
+      else set(f.k,f.t==='check'?ex[f.k.slice(2)]==='1':ex[f.k.slice(2)]);
+    }else if(f.k==='alpn')set(f.k,(n.alpn||[]).join(','));
+    else if(f.k==='version')set(f.k,String(n.version||5));
+    else set(f.k,n[f.k]);
+  }
+}
+async function openEdit(id){
+  const c=await api('GET','/api/config?id='+encodeURIComponent(id));
+  document.querySelector('nav a[data-tab=manual]').click();
+  fillForm(c.node);setEdit(id);
+  $('mRes').className='mut';$('mRes').textContent='Редактирование. Внимание: UoT, мультиплексирование и JSON не входят в ссылку и при копировании ссылки не передаются.';
 }
 async function addManual(check){
   $('mRes').className='err';$('mRes').textContent='';
   try{
     const r=await api('POST','/api/manual',collect());
-    $('mRes').className='ok';$('mRes').textContent='Добавлено';
+    $('mRes').className='ok';$('mRes').textContent=editId?'Сохранено':'Добавлено';setEdit(null);
     if(check)await api('POST','/api/check',{ids:[r.id]}).catch(e=>{$('mRes').textContent='Добавлено, но проверка не запущена: '+e.message});
     poll();
   }catch(e){if(e.message!=='auth')$('mRes').textContent=e.message}
 }
+$('mCancelEdit').onclick=()=>{setEdit(null);buildForm();$('mRes').textContent=''};
 $('mAdd').onclick=()=>addManual(false);$('mAddCheck').onclick=()=>addManual(true);
 
 /* ---------- настройки ---------- */

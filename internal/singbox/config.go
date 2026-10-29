@@ -225,6 +225,34 @@ func nodeObject(n node.Node, tag string) (obj, bool, error) {
 	default:
 		return nil, false, fmt.Errorf("протокол %q не поддерживается", n.Proto)
 	}
+	if n.Proto == node.SS && n.Extra["uot"] == "1" {
+		o["udp_over_tcp"] = true
+	}
+	if m := n.Extra["mux"]; m != "" && m != "none" {
+		switch n.Proto {
+		case node.SS, node.VLESS, node.VMess, node.Trojan:
+			mux := obj{"enabled": true, "protocol": m}
+			if v := intOr(n.Extra["mux_max_streams"], 0); v > 0 {
+				mux["max_streams"] = v
+			}
+			if n.Extra["mux_padding"] == "1" {
+				mux["padding"] = true
+			}
+			o["multiplex"] = mux
+		}
+	}
+	if raw := strings.TrimSpace(n.Extra["outbound_json"]); raw != "" {
+		var extra map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &extra); err != nil {
+			return nil, false, fmt.Errorf("доп. настройки outbound: %v", err)
+		}
+		for k, v := range extra {
+			if k == "tag" { // тег служебный
+				continue
+			}
+			o[k] = v
+		}
+	}
 	return o, false, nil
 }
 

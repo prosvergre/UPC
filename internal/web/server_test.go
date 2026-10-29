@@ -251,3 +251,44 @@ func TestManualAndSubscriptions(t *testing.T) {
 		t.Fatal("path traversal")
 	}
 }
+
+func TestManualExtrasAndEdit(t *testing.T) {
+	_, ts := newTestServer(t, "")
+	c := ts.Client()
+	body := `{"proto":"ss","name":"s","host":"5.5.5.5","port":8388,"method":"aes-256-gcm","password":"pw","extra":{"uot":"1","mux":"smux","outbound_json":"{\"tcp_fast_open\":true}"}}`
+	r := do(t, c, "POST", ts.URL+"/api/manual", body, xr)
+	if r.StatusCode != 200 {
+		t.Fatalf("manual: %d", r.StatusCode)
+	}
+	var m struct{ ID string }
+	decode(t, r, &m)
+	r = do(t, c, "GET", ts.URL+"/api/config?id="+m.ID, "", nil)
+	var ci struct {
+		Node struct {
+			Extra map[string]string `json:"extra"`
+		} `json:"node"`
+	}
+	decode(t, r, &ci)
+	if ci.Node.Extra["uot"] != "1" || ci.Node.Extra["mux"] != "smux" {
+		t.Fatalf("extras потерялись: %+v", ci.Node.Extra)
+	}
+	// редактирование: старый заменяется, extras обновляются
+	edit := `{"replace_id":"` + m.ID + `","proto":"ss","name":"s2","host":"5.5.5.5","port":8388,"method":"aes-256-gcm","password":"pw","extra":{"mux":"yamux"}}`
+	r = do(t, c, "POST", ts.URL+"/api/manual", edit, xr)
+	if r.StatusCode != 200 {
+		t.Fatalf("edit: %d", r.StatusCode)
+	}
+	var m2 struct{ ID string }
+	decode(t, r, &m2)
+	r = do(t, c, "GET", ts.URL+"/api/state", "", nil)
+	var st struct{ Rows []struct{ ID, Name string } }
+	decode(t, r, &st)
+	if len(st.Rows) != 1 || st.Rows[0].Name != "s2" {
+		t.Fatalf("после редактирования должна остаться одна строка s2: %+v", st.Rows)
+	}
+	// кривой JSON в доп. настройках отклоняется
+	badj := `{"proto":"ss","name":"s","host":"6.6.6.6","port":8388,"method":"aes-256-gcm","password":"pw","extra":{"outbound_json":"{oops"}}`
+	if r := do(t, c, "POST", ts.URL+"/api/manual", badj, xr); r.StatusCode != 400 {
+		t.Fatalf("плохой JSON: %d", r.StatusCode)
+	}
+}

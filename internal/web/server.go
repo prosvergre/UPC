@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -414,12 +415,17 @@ func (s *Server) handleAuto(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleManual(w http.ResponseWriter, r *http.Request) {
+	// Node имеет собственный UnmarshalJSON, поэтому поля запроса читаем отдельно
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	var n node.Node
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&n) != nil {
+	var extra struct {
+		ReplaceID string `json:"replace_id"`
+	}
+	if err != nil || json.Unmarshal(body, &n) != nil || json.Unmarshal(body, &extra) != nil {
 		s.run(w, fmt.Errorf("некорректный запрос"))
 		return
 	}
-	id, err := s.App.AddManual(n)
+	id, err := s.App.AddManual(n, extra.ReplaceID)
 	if err != nil {
 		s.run(w, err)
 		return

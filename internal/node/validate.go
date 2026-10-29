@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -24,6 +25,17 @@ var ssMethods = map[string]bool{
 func Validate(n Node) error {
 	if strings.TrimSpace(n.Host) == "" || n.Port <= 0 || n.Port > 65535 {
 		return fmt.Errorf("некорректный адрес")
+	}
+	if raw := strings.TrimSpace(n.Extra["outbound_json"]); raw != "" {
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			return fmt.Errorf("доп. настройки outbound: некорректный JSON-объект (%v)", err)
+		}
+	}
+	switch n.Extra["mux"] {
+	case "", "none", "smux", "yamux", "h2mux":
+	default:
+		return fmt.Errorf("мультиплексирование: неизвестный протокол %q", n.Extra["mux"])
 	}
 	switch n.Proto {
 	case SS:

@@ -518,18 +518,21 @@ func (a *App) RunScheduler(stop <-chan struct{}) {
 	}
 }
 
-// AddManual добавляет сервер, заполненный вручную (форма). Ссылка строится из полей.
-func (a *App) AddManual(n node.Node) (string, error) {
+// AddManual добавляет сервер, заполненный вручную (форма). Ссылка строится из
+// полей; параметры, которых в ссылке нет (UoT, мультиплексирование, JSON
+// outbound), сохраняются в самом сервере. replaceID != "" — это редактирование:
+// старый сервер заменяется новым (линия на нём останавливается).
+func (a *App) AddManual(n node.Node, replaceID string) (string, error) {
 	n.Raw = ""
 	n.Host = strings.TrimSpace(n.Host)
 	if n.Name == "" {
 		n.Name = n.Host
 	}
-	if err := node.Validate(n); err != nil {
-		return "", err
-	}
 	if n.Proto == node.SS && n.Method == "" {
 		return "", fmt.Errorf("укажите шифр")
+	}
+	if err := node.Validate(n); err != nil {
+		return "", err
 	}
 	n.Raw = node.Encode(n)
 	back, err := node.Parse(n.Raw)
@@ -537,7 +540,13 @@ func (a *App) AddManual(n node.Node) (string, error) {
 		return "", fmt.Errorf("параметры не складываются в корректную ссылку: %v", err)
 	}
 	back.Name = n.Name
-	res := a.Import(back.Raw)
+	back.Extra = n.Extra // Parse не знает про UoT/mux/JSON — берём из формы
+	if replaceID != "" {
+		if err := a.Delete(replaceID); err != nil {
+			return "", err
+		}
+	}
+	res := a.addNodes([]node.Node{back}, true)
 	if len(res.IDs) == 0 {
 		return "", fmt.Errorf("сервер не добавлен")
 	}
@@ -875,6 +884,7 @@ type ConfigInfo struct {
 	Link    string            `json:"link"`
 	Fields  map[string]string `json:"fields"`
 	Skipped string            `json:"skipped,omitempty"` // почему ядро не сможет его использовать
+	Node    node.Node         `json:"node"`              // для формы редактирования
 }
 
 // Config возвращает ссылку и разобранные поля сервера id.
@@ -889,7 +899,7 @@ func (a *App) Config(id string) (ConfigInfo, error) {
 	if !ok {
 		return ConfigInfo{}, fmt.Errorf("сервер не найден")
 	}
-	ci := ConfigInfo{ID: id, Link: n.Raw, Fields: map[string]string{}}
+	ci := ConfigInfo{ID: id, Link: n.Raw, Fields: map[string]string{}, Node: n}
 	add := func(k, v string) {
 		if v != "" {
 			ci.Fields[k] = v
@@ -961,6 +971,16 @@ func (a *App) Import(text string) ImportResult {
 			}
 		}
 	}
+	r2 := a.addNodes(nodes, false)
+	res.Added, res.Existing, res.IDs, res.Rejected = r2.Added, r2.Existing, r2.IDs, res.Rejected+r2.Rejected
+	res.Rejections = append(res.Rejections, r2.Rejections...)
+	return res
+}
+
+// addNodes добавляет готовые серверы закреплёнными. overwrite — заменить
+// параметры уже существующего сервера (для ручного ввода/редактирования).
+func (a *App) addNodes(nodes []node.Node, overwrite bool) ImportResult {
+	var res ImportResult
 	a.mu.Lock()
 	existing := map[string]*Row{}
 	for _, r := range a.rows {
@@ -977,6 +997,10 @@ func (a *App) Import(text string) ImportResult {
 		res.IDs = append(res.IDs, n.ID())
 		if r, ok := existing[n.ID()]; ok {
 			r.Pinned = true
+			if overwrite {
+				r.node = n
+				fill(r)
+			}
 			res.Existing++
 			continue
 		}
@@ -988,7 +1012,7 @@ func (a *App) Import(text string) ImportResult {
 	}
 	a.mu.Unlock()
 	a.save()
-	a.Logf("импорт: добавлено %d, уже было %d, отклонено %d", res.Added, res.Existing, res.Rejected)
+	a.Logf("добавление: новых %d, уже было %d, отклонено %d", res.Added, res.Existing, res.Rejected)
 	return res
 }
 
