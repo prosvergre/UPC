@@ -176,3 +176,78 @@ func TestImportAndConfig(t *testing.T) {
 		t.Fatalf("после удаления конфиг не должен находиться: %d", r.StatusCode)
 	}
 }
+
+func TestManualAndSubscriptions(t *testing.T) {
+	_, ts := newTestServer(t, "")
+	c := ts.Client()
+	// ручной ввод vless+reality (как отправляет форма)
+	pk := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	body := `{"proto":"vless","name":"мой","host":"1.2.3.4","port":443,"uuid":"11111111-2222-3333-4444-555555555555","flow":"xtls-rprx-vision","network":"","security":"reality","sni":"www.microsoft.com","fingerprint":"chrome","public_key":"` + pk + `","short_id":"ab12","alpn":[],"extra":{}}`
+	r := do(t, c, "POST", ts.URL+"/api/manual", body, xr)
+	if r.StatusCode != 200 {
+		t.Fatalf("manual: %d", r.StatusCode)
+	}
+	var m struct{ ID string }
+	decode(t, r, &m)
+	r = do(t, c, "GET", ts.URL+"/api/config?id="+m.ID, "", nil)
+	var ci struct {
+		Link   string
+		Fields map[string]string
+	}
+	decode(t, r, &ci)
+	if !strings.HasPrefix(ci.Link, "vless://11111111") || ci.Fields["Безопасность"] != "reality" {
+		t.Fatalf("ссылка из формы: %+v", ci)
+	}
+	// некорректный uuid отклоняется с понятной ошибкой
+	bad := strings.Replace(body, "11111111-2222-3333-4444-555555555555", "oops", 1)
+	if r := do(t, c, "POST", ts.URL+"/api/manual", bad, xr); r.StatusCode != 400 {
+		t.Fatalf("плохой uuid: %d", r.StatusCode)
+	}
+	// ручной ss
+	ss := `{"proto":"ss","name":"s","host":"5.5.5.5","port":8388,"method":"aes-256-gcm","password":"pw","extra":{}}`
+	if r := do(t, c, "POST", ts.URL+"/api/manual", ss, xr); r.StatusCode != 200 {
+		t.Fatalf("ss manual: %d", r.StatusCode)
+	}
+
+	// подписки: по умолчанию подставляется встроенный список; сохранение и валидация
+	r = do(t, c, "GET", ts.URL+"/api/settings", "", nil)
+	var st struct {
+		Subscriptions []struct {
+			URL     string `json:"url"`
+			Enabled bool   `json:"enabled"`
+		} `json:"subscriptions"`
+	}
+	decode(t, r, &st)
+	if len(st.Subscriptions) < 3 {
+		t.Fatalf("встроенные источники не подставились: %d", len(st.Subscriptions))
+	}
+	if r := do(t, c, "POST", ts.URL+"/api/subs", `{"subscriptions":[{"url":"ftp://x/y","name":"x","enabled":true}]}`, xr); r.StatusCode != 400 {
+		t.Fatalf("ftp-ссылка должна отклоняться: %d", r.StatusCode)
+	}
+	good := `{"subscriptions":[{"url":"https://example.com/sub.txt","name":"","enabled":true,"max_age_days":14},{"url":"https://example.com/sub.txt","name":"dup","enabled":true}]}`
+	if r := do(t, c, "POST", ts.URL+"/api/subs", good, xr); r.StatusCode != 200 {
+		t.Fatalf("subs: %d", r.StatusCode)
+	}
+	r = do(t, c, "GET", ts.URL+"/api/settings", "", nil)
+	var st2 struct {
+		Subscriptions []struct{ URL, Name string }
+	}
+	decode(t, r, &st2)
+	if len(st2.Subscriptions) != 1 || st2.Subscriptions[0].Name == "" {
+		t.Fatalf("дубликат не схлопнулся / имя не подставилось: %+v", st2)
+	}
+	// автопроверка: минимум 5 минут
+	if r := do(t, c, "POST", ts.URL+"/api/auto", `{"scan_min":1}`, xr); r.StatusCode != 400 {
+		t.Fatalf("scan_min=1: %d", r.StatusCode)
+	}
+	if r := do(t, c, "POST", ts.URL+"/api/auto", `{"scan_min":30,"scan_on_start":true}`, xr); r.StatusCode != 200 {
+		t.Fatalf("auto: %d", r.StatusCode)
+	}
+	// флаг отдаётся, мусорное имя — нет
+	if r := do(t, c, "GET", ts.URL+"/flags/gb.svg", "", nil); r.StatusCode != 200 || r.Header.Get("Content-Type") != "image/svg+xml" {
+		t.Fatalf("flag: %d", r.StatusCode)
+	}
+	if r := do(t, c, "GET", ts.URL+"/flags/../x.svg", "", nil); r.StatusCode == 200 {
+		t.Fatal("path traversal")
+	}
+}

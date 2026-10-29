@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"proxycheck/internal/engine"
+	"proxycheck/internal/geo"
 	"proxycheck/internal/node"
 	"proxycheck/internal/relay"
 	"proxycheck/internal/settings"
@@ -48,6 +50,10 @@ type Row struct {
 	Status    string  `json:"status"`
 	LatencyMs int64   `json:"latency_ms"`
 	ExitIP    string  `json:"exit_ip,omitempty"`
+	ExitErr   string  `json:"exit_err,omitempty"` // почему IP не определён
+	SpeedErr  string  `json:"speed_err,omitempty"`
+	Summary   string  `json:"summary"`
+	Country   string  `json:"country,omitempty"` // ISO-код (по флагу в имени; позже — по базе IP)
 	Running   bool    `json:"running"`
 	LocalPort int     `json:"local_port,omitempty"`
 	Selected  bool    `json:"selected"`
@@ -146,6 +152,8 @@ func normStatus(sr settings.ScanRow) string {
 
 func fill(r *Row) {
 	r.ID, r.Name, r.Proto, r.Host, r.Port = r.node.ID(), r.node.Label(), r.node.Proto, r.node.Host, r.node.Port
+	r.Summary = r.node.Summary()
+	r.Country = geo.CodeFromName(r.node.Name)
 }
 
 // Logf пишет строку в журнал (последние 200 строк).
@@ -227,30 +235,69 @@ func (a *App) newLab(nodes []node.Node, lanes int) (*engine.Lab, error) {
 	return engine.NewLab(a.engCfg, nodes, lanes)
 }
 
-// Scan загружает источники и проверяет все найденные серверы (в фоне).
+// seedSubs заполняет подписки встроенным списком при первом запуске.
+func (a *App) seedSubs() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.settings.Subscriptions) == 0 {
+		for _, src := range sources.Default {
+			a.settings.Subscriptions = append(a.settings.Subscriptions, settings.Subscription{URL: src.URL, Name: src.Name, Enabled: true})
+		}
+	}
+}
+
+// Scan загружает подписки (кроме устаревших) и проверяет все найденные серверы.
 func (a *App) Scan() error {
-	ctx, err := a.begin(Loading, "загрузка источников")
+	a.seedSubs()
+	ctx, err := a.begin(Loading, "проверка дат обновления источников")
 	if err != nil {
 		return err
 	}
 	go func() {
 		defer a.end()
-		fetched := sources.FetchAll(sources.Default, 20*time.Second)
+		a.refreshRemote(ctx, false)
+		a.setAct(Loading, "загрузка источников", 0, 0)
+
+		a.mu.Lock()
+		var list []sources.Source
+		for _, sub := range a.settings.Subscriptions {
+			if sub.Enabled && !sub.Stale {
+				list = append(list, sources.Source{Name: sub.Name, URL: sub.URL})
+			}
+		}
+		a.mu.Unlock()
+		fetched := sources.FetchAll(list, 20*time.Second)
+
 		seen := map[string]bool{}
 		var all []node.Node
+		perSub := map[string]map[string]bool{}
+		fetchErr := map[string]string{}
 		for _, fr := range fetched {
 			if fr.Err != nil {
 				a.Logf("источник %s: %v", fr.Source.Name, fr.Err)
+				fetchErr[fr.Source.URL] = fr.Err.Error()
 				continue
 			}
+			ids := map[string]bool{}
 			for _, n := range node.ExtractAll(fr.Body) {
+				ids[n.ID()] = true
 				if !seen[n.ID()] {
 					seen[n.ID()] = true
 					all = append(all, n)
 				}
 			}
+			perSub[fr.Source.URL] = ids
 		}
 		a.mu.Lock()
+		now := time.Now().Unix()
+		for i := range a.settings.Subscriptions {
+			sub := &a.settings.Subscriptions[i]
+			if ids, ok := perSub[sub.URL]; ok {
+				sub.Count, sub.LastFetch, sub.LastError = len(ids), now, ""
+			} else if e, bad := fetchErr[sub.URL]; bad {
+				sub.LastError = e
+			}
+		}
 		for _, r := range a.rows { // важные строки освежаем вместе со всеми
 			if (r.Running || r.Selected || r.Pinned) && !seen[r.ID] {
 				seen[r.ID] = true
@@ -258,10 +305,243 @@ func (a *App) Scan() error {
 			}
 		}
 		a.mu.Unlock()
-		a.Logf("получено %d серверов", len(all))
-		a.check(ctx, all)
+		a.Logf("получено %d серверов из %d источников", len(all), len(perSub))
+		results := a.check(ctx, all)
+		if results != nil {
+			alive := map[string]bool{}
+			for _, r := range results {
+				if r.Alive {
+					alive[r.Node.ID()] = true
+				}
+			}
+			a.mu.Lock()
+			for i := range a.settings.Subscriptions {
+				sub := &a.settings.Subscriptions[i]
+				if ids, ok := perSub[sub.URL]; ok {
+					n := 0
+					for id := range ids {
+						if alive[id] {
+							n++
+						}
+					}
+					sub.Alive = n
+				}
+			}
+			a.mu.Unlock()
+			a.save()
+		}
 	}()
 	return nil
+}
+
+// refreshRemote узнаёт даты обновления источников на удалённой стороне и
+// помечает устаревшие. force — игнорировать кэш (10 минут).
+func (a *App) refreshRemote(ctx context.Context, force bool) {
+	a.mu.Lock()
+	type job struct {
+		i   int
+		url string
+	}
+	var jobs []job
+	for i, sub := range a.settings.Subscriptions {
+		if !sub.Enabled {
+			continue
+		}
+		if !force && time.Now().Unix()-sub.RemoteChecked < 600 && sub.RemoteUpdated != 0 {
+			continue
+		}
+		jobs = append(jobs, job{i, sub.URL})
+	}
+	a.mu.Unlock()
+
+	type res struct {
+		t   time.Time
+		src string
+		err error
+	}
+	out := make([]res, len(jobs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for k, j := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(k int, url string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			t, src, err := sources.RemoteDate(ctx, url)
+			out[k] = res{t, src, err}
+		}(k, j.url)
+	}
+	wg.Wait()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	for k, j := range jobs {
+		if j.i >= len(a.settings.Subscriptions) || a.settings.Subscriptions[j.i].URL != j.url {
+			continue // список изменили во время проверки
+		}
+		sub := &a.settings.Subscriptions[j.i]
+		sub.RemoteChecked = now.Unix()
+		if out[k].err == nil {
+			sub.RemoteUpdated, sub.RemoteSource = out[k].t.Unix(), out[k].src
+		}
+	}
+	for i := range a.settings.Subscriptions {
+		sub := &a.settings.Subscriptions[i]
+		was := sub.Stale
+		sub.Stale = sub.Enabled && sub.MaxAgeDays > 0 && sub.RemoteUpdated != 0 &&
+			now.Sub(time.Unix(sub.RemoteUpdated, 0)) > time.Duration(sub.MaxAgeDays)*24*time.Hour
+		if sub.Stale && !was {
+			go a.Logf("источник %s не обновлялся более %d дн. — не загружаю, пока не обновится", sub.Name, sub.MaxAgeDays)
+		}
+	}
+}
+
+// RefreshSubs обновляет только даты источников (без загрузки списков).
+func (a *App) RefreshSubs() error {
+	a.seedSubs()
+	ctx, err := a.begin(Loading, "проверка дат обновления источников")
+	if err != nil {
+		return err
+	}
+	go func() {
+		defer a.end()
+		a.refreshRemote(ctx, true)
+		a.save()
+	}()
+	return nil
+}
+
+// Subscriptions возвращает текущие источники.
+func (a *App) Subscriptions() []settings.Subscription {
+	a.seedSubs()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]settings.Subscription(nil), a.settings.Subscriptions...)
+}
+
+// SetSubscriptions заменяет список источников. Правятся только URL, имя,
+// «включён» и максимальный возраст; статистика сохраняется по совпадению URL.
+func (a *App) SetSubscriptions(in []settings.Subscription) error {
+	if len(in) > 100 {
+		return fmt.Errorf("слишком много источников (максимум 100)")
+	}
+	a.mu.Lock()
+	old := map[string]settings.Subscription{}
+	for _, s := range a.settings.Subscriptions {
+		old[s.URL] = s
+	}
+	seen := map[string]bool{}
+	var out []settings.Subscription
+	for _, s := range in {
+		s.URL = strings.TrimSpace(s.URL)
+		u, err := url.Parse(s.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			a.mu.Unlock()
+			return fmt.Errorf("некорректная ссылка: %q (нужен http:// или https://)", s.URL)
+		}
+		if seen[s.URL] {
+			continue
+		}
+		seen[s.URL] = true
+		if s.MaxAgeDays < 0 {
+			s.MaxAgeDays = 0
+		}
+		if strings.TrimSpace(s.Name) == "" {
+			s.Name = u.Host + u.Path
+		}
+		if o, ok := old[s.URL]; ok {
+			s.LastFetch, s.RemoteUpdated, s.RemoteChecked, s.RemoteSource = o.LastFetch, o.RemoteUpdated, o.RemoteChecked, o.RemoteSource
+			s.Count, s.Alive, s.LastError, s.Stale = o.Count, o.Alive, o.LastError, o.Stale
+		}
+		out = append(out, s)
+	}
+	a.settings.Subscriptions = out
+	st := a.settings
+	a.mu.Unlock()
+	return settings.Save(a.path, st)
+}
+
+// AutoSettings — параметры автозагрузки.
+type AutoSettings struct {
+	ScanMin     int  `json:"scan_min"`
+	ScanOnStart bool `json:"scan_on_start"`
+}
+
+// Auto возвращает параметры автозагрузки.
+func (a *App) Auto() AutoSettings {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return AutoSettings{a.settings.AutoScanMin, a.settings.AutoScanOnStart}
+}
+
+// SetAuto сохраняет параметры автозагрузки.
+func (a *App) SetAuto(v AutoSettings) error {
+	if v.ScanMin < 0 || v.ScanMin > 7*24*60 {
+		return fmt.Errorf("период должен быть от 0 до 10080 минут")
+	}
+	if v.ScanMin > 0 && v.ScanMin < 5 {
+		return fmt.Errorf("минимальный период автопроверки — 5 минут")
+	}
+	a.UpdateSettings(func(s *settings.Settings) { s.AutoScanMin, s.AutoScanOnStart = v.ScanMin, v.ScanOnStart })
+	return nil
+}
+
+// RunScheduler выполняет автозагрузку по расписанию до закрытия stop.
+func (a *App) RunScheduler(stop <-chan struct{}) {
+	if a.Auto().ScanOnStart {
+		select {
+		case <-time.After(3 * time.Second):
+			if err := a.Scan(); err != nil {
+				a.Logf("автозапуск проверки: %v", err)
+			}
+		case <-stop:
+			return
+		}
+	}
+	last := time.Now()
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			m := a.Auto().ScanMin
+			if m > 0 && time.Since(last) >= time.Duration(m)*time.Minute {
+				if err := a.Scan(); err == nil {
+					last = time.Now()
+				}
+			}
+		}
+	}
+}
+
+// AddManual добавляет сервер, заполненный вручную (форма). Ссылка строится из полей.
+func (a *App) AddManual(n node.Node) (string, error) {
+	n.Raw = ""
+	n.Host = strings.TrimSpace(n.Host)
+	if n.Name == "" {
+		n.Name = n.Host
+	}
+	if err := node.Validate(n); err != nil {
+		return "", err
+	}
+	if n.Proto == node.SS && n.Method == "" {
+		return "", fmt.Errorf("укажите шифр")
+	}
+	n.Raw = node.Encode(n)
+	back, err := node.Parse(n.Raw)
+	if err != nil {
+		return "", fmt.Errorf("параметры не складываются в корректную ссылку: %v", err)
+	}
+	back.Name = n.Name
+	res := a.Import(back.Raw)
+	if len(res.IDs) == 0 {
+		return "", fmt.Errorf("сервер не добавлен")
+	}
+	return res.IDs[0], nil
 }
 
 // Recheck перепроверяет уже известные серверы без загрузки источников.
@@ -283,7 +563,7 @@ func (a *App) Recheck() error {
 	return nil
 }
 
-func (a *App) check(ctx context.Context, all []node.Node) {
+func (a *App) check(ctx context.Context, all []node.Node) []engine.Result {
 	var valid []node.Node
 	for _, n := range all {
 		if node.Validate(n) == nil {
@@ -292,13 +572,13 @@ func (a *App) check(ctx context.Context, all []node.Node) {
 	}
 	if len(valid) == 0 {
 		a.Logf("нет серверов для проверки")
-		return
+		return nil
 	}
 	a.setAct(Starting, fmt.Sprintf("запуск ядра, загрузка %d серверов", len(valid)), 0, 0)
 	lab, err := a.newLab(valid, 8)
 	if err != nil {
 		a.Logf("ядро: %v", err)
-		return
+		return nil
 	}
 	defer lab.Close()
 	to := time.Duration(a.TimeoutSec) * time.Second
@@ -308,7 +588,7 @@ func (a *App) check(ctx context.Context, all []node.Node) {
 	})
 	if ctx.Err() != nil {
 		a.Logf("проверка прервана")
-		return
+		return nil
 	}
 	a.applyResults(results)
 	if a.DetectExit {
@@ -322,6 +602,7 @@ func (a *App) check(ctx context.Context, all []node.Node) {
 	}
 	a.save()
 	a.Logf("готово: живых %d из %d", countAlive(results), len(results))
+	return results
 }
 
 func countAlive(rs []engine.Result) int {
@@ -406,16 +687,17 @@ func (a *App) exitIPs(ctx context.Context, lab *engine.Lab, nodes []node.Node, t
 		go func(n node.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			ip, err := lab.ExitIP(ctx, n, to)
-			if err == nil {
-				a.mu.Lock()
-				for _, r := range a.rows {
-					if r.ID == n.ID() {
-						r.ExitIP = ip
-					}
+			// IP-сервисы медленнее generate_204 (TLS + запрос), берём запас по времени
+			ip, err := lab.ExitIP(ctx, n, to*2)
+			a.mu.Lock()
+			if r, ok := a.find(n.ID()); ok {
+				if err == nil {
+					r.ExitIP, r.ExitErr = ip, ""
+				} else {
+					r.ExitErr = err.Error()
 				}
-				a.mu.Unlock()
 			}
+			a.mu.Unlock()
 			cmu.Lock()
 			cnt++
 			c := cnt
@@ -545,8 +827,18 @@ func (a *App) SpeedTest(ids []string) error {
 				}
 			}
 			a.mu.Unlock()
+			a.mu.Lock()
+			if r, ok := a.find(n.ID()); ok {
+				r.SpeedErr = ""
+				if derr != nil {
+					r.SpeedErr = derr.Error()
+				}
+			}
+			a.mu.Unlock()
 			if derr != nil {
 				a.Logf("%s: ошибка замера: %v", n.Label(), derr)
+			} else {
+				a.Logf("%s: ↓ %.1f Мбит/с", n.Label(), down.Mbps)
 			}
 		}
 		a.save()

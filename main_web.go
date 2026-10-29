@@ -77,6 +77,10 @@ func runWeb(args []string) int {
 	url := fmt.Sprintf("%s://%s/", scheme, listen)
 	fmt.Println("Веб-интерфейс:", url)
 
+	stopSched := make(chan struct{})
+	go a.RunScheduler(stopSched)
+	defer close(stopSched)
+
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe(listen, *cert, *key) }()
 	if !*noOpen && web.IsLoopback(listen) {

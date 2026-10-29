@@ -25,6 +25,26 @@ type Profile struct {
 	HealthIntervalSec int       `json:"health_interval_sec"` // 0 = использовать значение по умолчанию
 }
 
+// Subscription — источник списка серверов (ссылка на подписку).
+type Subscription struct {
+	URL     string `json:"url"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	// MaxAgeDays: если на удалённой стороне источник не обновлялся дольше
+	// этого срока, он не загружается, пока там не появится обновление
+	// (дата проверяется при каждом скане). 0 — не проверять возраст.
+	MaxAgeDays int `json:"max_age_days"`
+
+	LastFetch     int64  `json:"last_fetch,omitempty"`     // когда мы последний раз загрузили (unix)
+	RemoteUpdated int64  `json:"remote_updated,omitempty"` // когда обновлён на удалённой стороне (unix)
+	RemoteChecked int64  `json:"remote_checked,omitempty"` // когда мы последний раз спрашивали дату (unix)
+	RemoteSource  string `json:"remote_source,omitempty"`  // откуда взята дата: last-modified | github-commit
+	Count         int    `json:"count"`                    // сколько серверов скачано с этого источника
+	Alive         int    `json:"alive"`                    // сколько из них живых при последней проверке
+	Stale         bool   `json:"stale,omitempty"`          // пропущен как устаревший
+	LastError     string `json:"last_error,omitempty"`
+}
+
 // Settings — корневая структура файла настроек.
 type Settings struct {
 	Profiles []Profile `json:"profiles"`
@@ -62,6 +82,14 @@ type Settings struct {
 
 	// WebListen — адрес веб-интерфейса (по умолчанию 127.0.0.1:8080).
 	// WebPasswordHash — bcrypt-хеш пароля; обязателен для нелокального адреса.
+	// Subscriptions — источники серверов. Пусто при первом запуске: тогда
+	// заполняется встроенным списком.
+	Subscriptions []Subscription `json:"subscriptions,omitempty"`
+	// AutoScanMin — период автозагрузки и проверки, минут (0 — выключено).
+	AutoScanMin int `json:"auto_scan_min,omitempty"`
+	// AutoScanOnStart — загрузить и проверить сразу при запуске.
+	AutoScanOnStart bool `json:"auto_scan_on_start,omitempty"`
+
 	WebListen       string `json:"web_listen,omitempty"`
 	WebPasswordHash string `json:"web_password_hash,omitempty"`
 }

@@ -19,9 +19,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"proxycheck/internal/app"
+	"proxycheck/internal/node"
+	"proxycheck/internal/settings"
 )
 
-//go:embed static/index.html
+//go:embed static/index.html static/flags
 var static embed.FS
 
 // Server — веб-сервер.
@@ -98,6 +100,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/line", s.guard(s.handleLine))
 	mux.HandleFunc("/api/speed", s.guard(post(s.handleSpeed)))
 	mux.HandleFunc("/api/config", s.guard(s.handleConfig))
+	mux.HandleFunc("/api/settings", s.guard(s.handleSettings))
+	mux.HandleFunc("/api/subs", s.guard(post(s.handleSubs)))
+	mux.HandleFunc("/api/subs/refresh", s.guard(post(func(w http.ResponseWriter, r *http.Request) { s.run(w, s.App.RefreshSubs()) })))
+	mux.HandleFunc("/api/auto", s.guard(post(s.handleAuto)))
+	mux.HandleFunc("/api/manual", s.guard(post(s.handleManual)))
+	mux.HandleFunc("/flags/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/flags/")
+		if len(name) != 6 || !strings.HasSuffix(name, ".svg") { // aa.svg
+			http.NotFound(w, r)
+			return
+		}
+		b, err := static.ReadFile("static/flags/" + strings.ToLower(name))
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+		w.Write(b)
+	})
 	mux.HandleFunc("/api/import", s.guard(post(s.handleImport)))
 	mux.HandleFunc("/api/delete", s.guard(post(s.handleDelete)))
 	mux.HandleFunc("/api/check", s.guard(post(s.handleCheck)))
@@ -360,4 +382,47 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.run(w, s.App.CheckIDs(b.IDs))
+}
+
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]interface{}{
+		"subscriptions": s.App.Subscriptions(),
+		"auto":          s.App.Auto(),
+		"web_listen":    s.App.Settings().WebListen,
+		"password_set":  s.authRequired(),
+	})
+}
+
+func (s *Server) handleSubs(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Subscriptions []settings.Subscription `json:"subscriptions"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&b) != nil {
+		s.run(w, fmt.Errorf("некорректный запрос"))
+		return
+	}
+	s.run(w, s.App.SetSubscriptions(b.Subscriptions))
+}
+
+func (s *Server) handleAuto(w http.ResponseWriter, r *http.Request) {
+	var b app.AutoSettings
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&b) != nil {
+		s.run(w, fmt.Errorf("некорректный запрос"))
+		return
+	}
+	s.run(w, s.App.SetAuto(b))
+}
+
+func (s *Server) handleManual(w http.ResponseWriter, r *http.Request) {
+	var n node.Node
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&n) != nil {
+		s.run(w, fmt.Errorf("некорректный запрос"))
+		return
+	}
+	id, err := s.App.AddManual(n)
+	if err != nil {
+		s.run(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"id": id})
 }
