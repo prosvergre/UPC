@@ -21,8 +21,15 @@ jobs:
           curl -sSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
           tar xzf sb.tgz
           echo "SINGBOX_BIN=$PWD/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box" >> "$GITHUB_ENV"
-      - name: Test node + singbox packages
-        run: go test -v ./internal/node/... ./internal/singbox/... ./internal/engine/... ./internal/relay/... ./internal/gui/...
+      - name: Install GUI build deps (fyne/cgo)
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
+      - name: Tests
+        run: |
+          set +e
+          go test -v ./internal/... > test.log 2>&1
+          rc=$?
+          grep -E "^(--- FAIL|FAIL|panic)|_test.go:[0-9]+|cannot|undefined|error" test.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
+          exit $rc
 
   windows:
     runs-on: windows-latest
