@@ -32,6 +32,7 @@ type ui struct {
 	linesTV                                  *walk.TableView
 	lm                                       *lineModel
 	status                                   *walk.Label
+	detail                                   *walk.Label
 	prog                                     *walk.ProgressBar
 	scanBtn, recheckBtn, speedBtn, cancelBtn *walk.PushButton
 	logEdit                                  *walk.TextEdit
