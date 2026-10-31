@@ -16,14 +16,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.24'
       - name: Download sing-box (for integration tests)
         run: |
           curl -sSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
           tar xzf sb.tgz
           echo "SINGBOX_BIN=$PWD/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box" >> "$GITHUB_ENV"
-      - name: Install GUI build deps (fyne/cgo)
-        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
       - name: Tests
         run: |
           set +e
@@ -38,12 +36,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-      - name: Build Windows exe
+          go-version: '1.24'
+      - name: Build Windows exe (native Walk window, no cgo)
         run: |
           go build -ldflags="-s -w -H=windowsgui" -o dist/proxycheck.exe .
         env:
-          CGO_ENABLED: 1
+          CGO_ENABLED: 0
       - name: Bundle sing-box
         shell: bash
         run: |
@@ -65,11 +63,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-      - name: Build (no GUI, no cgo; web interface by default)
+          go-version: '1.24'
+      - name: Build (no cgo; web interface by default)
         run: |
           mkdir dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -tags nogui -ldflags="-s -w" -o dist/proxycheck .
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -ldflags="-s -w" -o dist/proxycheck .
       - name: Bundle sing-box
         run: |
           curl -sSL -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${{ matrix.arch }}.tar.gz"

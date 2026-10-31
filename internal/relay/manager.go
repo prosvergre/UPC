@@ -478,3 +478,18 @@ func (m *Manager) Traffic(ctx context.Context) (map[int][2]int64, error) {
 	}
 	return out, nil
 }
+
+// SetListen меняет адрес входов (127.0.0.1 — только этот компьютер, 0.0.0.0 —
+// вся сеть). Если линии уже запущены, ядро перезапускается с новым адресом.
+func (m *Manager) SetListen(addr string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Listen == addr {
+		return nil
+	}
+	m.Listen = addr
+	if len(m.endpoints) == 0 {
+		return nil
+	}
+	return m.rebuildLocked()
+}

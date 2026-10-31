@@ -333,7 +333,7 @@ func parseVMess(raw string) (Node, error) {
 		n.Network = "http"
 	case "grpc":
 		n.Network = "grpc"
-		n.ServiceName = j.Path
+		n.ServiceName, n.Path = j.Path, "" // в vmess-ссылках имя gRPC-службы лежит в path
 	default:
 		n.Network = j.Net
 	}

@@ -135,7 +135,10 @@ func New(settingsPath string) *App {
 	} else {
 		a.coreErr = err.Error()
 	}
-	a.mgr.Listen = "0.0.0.0"
+	a.mgr.Listen = "127.0.0.1"
+	if a.settings.LinesLAN {
+		a.mgr.Listen = "0.0.0.0"
+	}
 	return a
 }
 
@@ -779,6 +782,7 @@ func (a *App) StartLine(id string, port int) (int, error) {
 	}
 	a.mu.Unlock()
 	a.Logf("линия %d -> %s", ep.LocalPort, n.Label())
+	a.saveProfiles()
 	return ep.LocalPort, nil
 }
 
@@ -792,6 +796,7 @@ func (a *App) StopLine(id string) error {
 		r.Running, r.LocalPort = false, 0
 	}
 	a.mu.Unlock()
+	a.saveProfiles()
 	return nil
 }
 
@@ -1106,4 +1111,98 @@ func (a *App) checkPartial(ctx context.Context, nodes []node.Node) {
 		a.exitIPs(ctx, lab, alive, to)
 	}
 	a.save()
+}
+
+// saveProfiles запоминает запущенные линии, чтобы поднять их при следующем старте.
+func (a *App) saveProfiles() {
+	var profs []settings.Profile
+	for i, ep := range a.mgr.Endpoints() {
+		profs = append(profs, settings.Profile{ID: i + 1, Server: ep.CurrentServer(), LocalPort: ep.LocalPort, Enabled: true})
+	}
+	sort.Slice(profs, func(i, j int) bool { return profs[i].LocalPort < profs[j].LocalPort })
+	a.UpdateSettings(func(s *settings.Settings) { s.Profiles = profs })
+}
+
+// RestoreLines поднимает сохранённые линии (одним запуском ядра).
+func (a *App) RestoreLines() {
+	a.mu.Lock()
+	var profs []settings.Profile
+	for _, p := range a.settings.Profiles {
+		if p.Enabled {
+			profs = append(profs, p)
+		}
+	}
+	a.mu.Unlock()
+	if len(profs) == 0 {
+		return
+	}
+	var nodes []node.Node
+	var ports []int
+	for _, p := range profs {
+		nodes = append(nodes, p.Server)
+		ports = append(ports, p.LocalPort)
+	}
+	eps, errs := a.mgr.StartMany(nodes, ports)
+	a.mu.Lock()
+	for i, n := range nodes {
+		if errs[i] != nil {
+			a.logfLocked("не удалось восстановить линию %s: %v", n.Label(), errs[i])
+			continue
+		}
+		r, ok := a.find(n.ID())
+		if !ok {
+			r = &Row{node: n, Status: StatusUnknown, Pinned: true}
+			fill(r)
+			a.rows = append(a.rows, r)
+		}
+		r.Running, r.LocalPort = true, eps[i].LocalPort
+	}
+	a.mu.Unlock()
+	a.Logf("восстановлено линий: %d", len(profs))
+}
+
+func (a *App) logfLocked(format string, args ...interface{}) {
+	line := time.Now().Format("15:04:05 ") + fmt.Sprintf(format, args...)
+	a.logs = append(a.logs, line)
+	if len(a.logs) > 200 {
+		a.logs = a.logs[len(a.logs)-200:]
+	}
+}
+
+// Run запускает фоновую работу: восстановление линий, health-мониторинг с
+// заменой упавших серверов и автозагрузку по расписанию. Блокируется до stop.
+func (a *App) Run(stop <-chan struct{}) {
+	a.RestoreLines()
+	go a.mgr.RunHealthLoop(20*time.Second, time.Duration(a.TimeoutSec)*time.Second, 2, stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case ev := <-a.mgr.Events():
+				a.Logf("[линия] %s", ev.Message)
+			}
+		}
+	}()
+	a.RunScheduler(stop)
+}
+
+// LinesLAN сообщает, открыты ли линии для локальной сети.
+func (a *App) LinesLAN() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.settings.LinesLAN
+}
+
+// SetLinesLAN открывает или закрывает линии для локальной сети.
+func (a *App) SetLinesLAN(on bool) error {
+	addr := "127.0.0.1"
+	if on {
+		addr = "0.0.0.0"
+	}
+	if err := a.mgr.SetListen(addr); err != nil {
+		return err
+	}
+	a.UpdateSettings(func(s *settings.Settings) { s.LinesLAN = on })
+	return nil
 }

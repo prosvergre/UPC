@@ -78,7 +78,7 @@ func runWeb(args []string) int {
 	fmt.Println("Веб-интерфейс:", url)
 
 	stopSched := make(chan struct{})
-	go a.RunScheduler(stopSched)
+	go a.Run(stopSched)
 	defer close(stopSched)
 
 	errc := make(chan error, 1)

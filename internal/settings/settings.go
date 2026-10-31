@@ -85,6 +85,8 @@ type Settings struct {
 	// Subscriptions — источники серверов. Пусто при первом запуске: тогда
 	// заполняется встроенным списком.
 	Subscriptions []Subscription `json:"subscriptions,omitempty"`
+	// LinesLAN — принимать подключения к линиям из локальной сети (иначе только с этого компьютера).
+	LinesLAN bool `json:"lines_lan,omitempty"`
 	// AutoScanMin — период автозагрузки и проверки, минут (0 — выключено).
 	AutoScanMin int `json:"auto_scan_min,omitempty"`
 	// AutoScanOnStart — загрузить и проверить сразу при запуске.
