@@ -74,6 +74,12 @@ func (m *lineModel) Value(row, col int) interface{} {
 
 // Run открывает окно и блокируется до его закрытия. Возвращает код выхода.
 func Run(a *app.App, opts Options) int {
+	// Форк Tailscale требует InitApp до любых других вызовов Walk (регистрирует
+	// классы окон и запускает инфраструктуру UI-потока).
+	if _, err := walk.InitApp(); err != nil {
+		walk.MsgBox(nil, "proxycheck", "Не удалось инициализировать интерфейс: "+err.Error(), walk.MsgBoxIconError)
+		return 1
+	}
 	u := &ui{a: a, opts: opts, rm: newRowModel(), lm: &lineModel{}, done: make(chan struct{})}
 	u.rm.onCheck = func(id string, on bool) { a.Select(id, on) }
 
