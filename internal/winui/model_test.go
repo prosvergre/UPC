@@ -15,7 +15,7 @@ func TestCellTextAndSort(t *testing.T) {
 	if got := CellText(rows[0], 2); got != "de-2" {
 		t.Errorf("флаг-эмодзи в имени должен скрываться: %q", got)
 	}
-	if got := CellText(rows[1], 2); got != "gb 📌" {
+	if got := CellText(rows[1], 2); got != "gb  [ручной]" {
 		t.Errorf("закрепление: %q", got)
 	}
 	if CellText(rows[0], 0) != FlagPad+"DE" || CellText(rows[2], 0) != "" {

@@ -50,16 +50,12 @@ func (u *ui) manualPage() []Widget {
 							ComboBox{AssignTo: &m.proto, MinSize: Size{Width: 220}},
 							HSpacer{},
 						}},
-						ScrollView{
-							Layout: VBox{MarginsZero: true},
-							Children: []Widget{
-								Composite{AssignTo: &m.host, Layout: Grid{Columns: 2, MarginsZero: true, Spacing: 6}},
-							},
-						},
+						Composite{AssignTo: &m.host, Layout: VBox{MarginsZero: true, Spacing: 4}},
+						VSpacer{},
 						Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 							PushButton{AssignTo: &m.addBtn, Text: "Добавить", OnClicked: func() { m.submit(false) }},
 							PushButton{AssignTo: &m.addChk, Text: "Добавить и проверить", OnClicked: func() { m.submit(true) }},
-							PushButton{AssignTo: &m.cancel, Text: "Отменить правку", Visible: false, OnClicked: m.cancelEdit},
+							PushButton{AssignTo: &m.cancel, Text: "Отменить правку", OnClicked: m.cancelEdit},
 							HSpacer{},
 						}},
 						Label{AssignTo: &m.result, Text: ""},
@@ -95,6 +91,7 @@ func (m *manualUI) init(u *ui) {
 	_ = m.proto.SetModel(m.protos)
 	m.proto.SetCurrentIndex(0)
 	m.proto.CurrentIndexChanged().Attach(func() { m.rebuild(m.currentProto(), nil) })
+	m.cancel.SetEnabled(false)
 	m.rebuild(m.currentProto(), nil)
 }
 
@@ -118,10 +115,18 @@ func (m *manualUI) rebuild(proto string, vals map[string]string) {
 	m.ctls = map[string]*fieldCtl{}
 	all := append(append([]Field(nil), CommonFields...), info.Fields...)
 	for _, f := range all {
-		lb, _ := walk.NewLabel(m.host)
-		_ = lb.SetText(f.Label)
+		// каждая строка формы — свой контейнер «подпись + поле»
+		row, _ := walk.NewComposite(m.host)
+		hb := walk.NewHBoxLayout()
+		_ = hb.SetMargins(walk.Margins{})
+		_ = hb.SetSpacing(6)
+		_ = row.SetLayout(hb)
+		lb, _ := walk.NewLabel(row)
+		if f.Kind != Check { // у галочки подпись — её собственный текст
+			_ = lb.SetText(f.Label)
+		}
 		lb.SetMinMaxSize(walk.Size{Width: 190}, walk.Size{})
-		m.ctls[f.Key] = m.newControl(f)
+		m.ctls[f.Key] = m.newControl(row, f)
 	}
 	if vals != nil {
 		for k, v := range vals {
@@ -133,10 +138,10 @@ func (m *manualUI) rebuild(proto string, vals map[string]string) {
 	m.host.RequestLayout()
 }
 
-func (m *manualUI) newControl(f Field) *fieldCtl {
+func (m *manualUI) newControl(parent walk.Container, f Field) *fieldCtl {
 	switch f.Kind {
 	case Select:
-		cb, _ := walk.NewComboBox(m.host)
+		cb, _ := walk.NewComboBox(parent)
 		items := make([]*optItem, len(f.Opts))
 		for i, o := range f.Opts {
 			items[i] = &optItem{o.Value, o.Label}
@@ -163,7 +168,8 @@ func (m *manualUI) newControl(f Field) *fieldCtl {
 			},
 		}
 	case Check:
-		ck, _ := walk.NewCheckBox(m.host)
+		ck, _ := walk.NewCheckBox(parent)
+		_ = ck.SetText(f.Label)
 		return &fieldCtl{
 			get: func() string {
 				if ck.Checked() {
@@ -174,11 +180,11 @@ func (m *manualUI) newControl(f Field) *fieldCtl {
 			set: func(v string) { ck.SetChecked(v == "1" || v == "true") },
 		}
 	case Area:
-		te, _ := walk.NewTextEdit(m.host)
-		te.SetMinMaxSize(walk.Size{Width: 260, Height: 70}, walk.Size{})
+		te, _ := walk.NewTextEdit(parent)
+		te.SetMinMaxSize(walk.Size{Width: 260, Height: 60}, walk.Size{Height: 90})
 		return &fieldCtl{get: te.Text, set: func(v string) { _ = te.SetText(strings.ReplaceAll(v, "\n", "\r\n")) }}
 	default:
-		le, _ := walk.NewLineEdit(m.host)
+		le, _ := walk.NewLineEdit(parent)
 		le.SetMinMaxSize(walk.Size{Width: 260}, walk.Size{})
 		if f.Kind == Password {
 			// пароль показываем открытым: это прокси-учётки, их нужно видеть и сверять
@@ -228,7 +234,7 @@ func (m *manualUI) setEdit(id string) {
 		m.addBtn.SetText("Добавить")
 		m.addChk.SetText("Добавить и проверить")
 	}
-	m.cancel.SetVisible(id != "")
+	m.cancel.SetEnabled(id != "")
 }
 
 // edit заполняет форму существующим сервером.

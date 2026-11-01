@@ -16,6 +16,7 @@ var ServerCols = []struct {
 	Width int
 	Right bool
 }{
+	{"", 26, false}, // галочка отметки (системная, рисуется в первой колонке)
 	{"Страна", 70, false}, {"Статус", 70, false}, {"Имя", 230, false}, {"Протокол", 75, false},
 	{"Параметры", 150, false}, {"Адрес", 170, false}, {"Задержка", 75, true},
 	{"Выходной IP", 130, false}, {"↓ Мбит/с", 75, true}, {"↑ Мбит/с", 75, true},
@@ -53,7 +54,7 @@ func CellText(r app.Row, col int) string {
 	case 2:
 		name := flagEmoji.ReplaceAllString(r.Name, "")
 		if r.Pinned {
-			name += " 📌"
+			name += "  [ручной]"
 		}
 		return name
 	case 3:

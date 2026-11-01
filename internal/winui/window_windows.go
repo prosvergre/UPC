@@ -267,6 +267,14 @@ func countAlive(rows []app.Row) int {
 }
 
 func (u *ui) afterCreate() {
+	// служебные панели главного окна нам не нужны; пустой тулбар иначе перекрывает верхний ряд кнопок
+	if tb := u.mw.ToolBar(); tb != nil {
+		tb.SetVisible(false)
+	}
+	if sb := u.mw.StatusBar(); sb != nil {
+		sb.SetVisible(false)
+	}
+	u.rm.font = u.tv.Font()
 	u.selectionChanged()
 	u.manual.init(u)
 	u.settings.init(u)

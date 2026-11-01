@@ -21,6 +21,7 @@ type rowModel struct {
 	sortAsc bool
 	checked map[string]bool
 	onCheck func(id string, on bool)
+	font    *walk.Font // шрифт таблицы (для кода страны, который рисуется вручную)
 }
 
 func newRowModel() *rowModel {
@@ -29,11 +30,15 @@ func newRowModel() *rowModel {
 
 func (m *rowModel) RowCount() int { return len(m.rows) }
 
+// Колонка 0 модели — только галочка; данные начинаются с колонки 1.
 func (m *rowModel) Value(row, col int) interface{} {
-	if row < 0 || row >= len(m.rows) {
+	if row < 0 || row >= len(m.rows) || col < 1 {
 		return ""
 	}
-	return CellText(m.rows[row], col)
+	if col == 1 {
+		return "" // страна рисуется вручную: флаг + код
+	}
+	return CellText(m.rows[row], col-1)
 }
 
 // Checked/SetChecked — галочки отметки серверов (для замера скорости).
@@ -48,7 +53,10 @@ func (m *rowModel) SetChecked(row int, on bool) error {
 }
 
 func (m *rowModel) Sort(col int, order walk.SortOrder) error {
-	m.sortCol, m.sortAsc = col, order == walk.SortAscending
+	if col < 1 {
+		return nil
+	}
+	m.sortCol, m.sortAsc = col-1, order == walk.SortAscending
 	m.SorterBase.Sort(col, order)
 	m.resort()
 	m.PublishRowsReset()
@@ -123,7 +131,7 @@ func (m *rowModel) StyleCell(s *walk.CellStyle) {
 		return
 	}
 	r := m.rows[row]
-	switch s.Col() {
+	switch s.Col() - 1 {
 	case 0:
 		if r.Country != "" {
 			m.drawFlag(s, r.Country)
@@ -163,7 +171,21 @@ func (m *rowModel) drawFlag(s *walk.CellStyle, code string) {
 		return
 	}
 	b := s.BoundsPixels()
-	w, h := 24*dpi/96, 18*dpi/96
+	// флаг 4:3 подгоняется под высоту строки (не больше 24×18 при 96 DPI)
+	h := b.Height - 2*dpi/96
+	if max := 18 * dpi / 96; h > max {
+		h = max
+	}
+	if h < 8 {
+		return
+	}
+	w := h * 4 / 3
 	y := b.Y + (b.Height-h)/2
-	_ = canvas.DrawImageStretchedPixels(bmp, walk.Rectangle{X: b.X + 4*dpi/96, Y: y, Width: w, Height: h})
+	gap := 4 * dpi / 96
+	_ = canvas.DrawImageStretchedPixels(bmp, walk.Rectangle{X: b.X + gap, Y: y, Width: w, Height: h})
+	if m.font != nil {
+		_ = canvas.DrawTextPixels(code, m.font, walk.RGB(0, 0, 0),
+			walk.Rectangle{X: b.X + gap + w + gap, Y: b.Y, Width: b.Width - (2*gap + w), Height: b.Height},
+			walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextNoPrefix)
+	}
 }
