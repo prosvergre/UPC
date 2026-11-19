@@ -50,6 +50,9 @@ func CellText(r app.Row, col int) string {
 		}
 		return FlagPad + r.Country
 	case 1:
+		if r.Busy == "check" {
+			return "проверка…"
+		}
 		return StatusText(r.Status)
 	case 2:
 		name := flagEmoji.ReplaceAllString(r.Name, "")
@@ -74,16 +77,27 @@ func CellText(r app.Row, col int) string {
 		if r.Status == app.StatusAlive && r.ExitErr != "" {
 			return "не определён"
 		}
-	case 8:
-		if r.SpeedMbps > 0 {
-			return fmt.Sprintf("%.1f", r.SpeedMbps)
+	case 8, 9:
+		switch r.Busy {
+		case "speed":
+			return "замер…"
+		case "queued":
+			return "в очереди"
 		}
-		if r.SpeedErr != "" {
-			return "ошибка"
-		}
-	case 9:
-		if r.UlMbps > 0 {
-			return fmt.Sprintf("%.1f", r.UlMbps)
+		if col == 8 {
+			if r.SpeedMbps > 0 {
+				return fmt.Sprintf("%.1f", r.SpeedMbps)
+			}
+			if r.SpeedErr != "" {
+				return "ошибка"
+			}
+		} else {
+			if r.UlMbps > 0 {
+				return fmt.Sprintf("%.1f", r.UlMbps)
+			}
+			if r.UlErr != "" {
+				return "ошибка"
+			}
 		}
 	}
 	return ""
@@ -98,6 +112,8 @@ func CellTip(r app.Row, col int) string {
 		}
 	case 8:
 		return r.SpeedErr
+	case 9:
+		return r.UlErr
 	}
 	return ""
 }
@@ -168,4 +184,12 @@ func Percent(a app.Activity) int {
 		return -1
 	}
 	return a.Done * 100 / a.Total
+}
+
+// CheckedFirst переставляет строки так, чтобы отмеченные оказались сверху,
+// сохраняя относительный порядок внутри обеих групп.
+func CheckedFirst(rows []app.Row, checked func(id string) bool) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return checked(rows[i].ID) && !checked(rows[j].ID)
+	})
 }

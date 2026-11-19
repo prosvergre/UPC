@@ -23,22 +23,10 @@ func (u *ui) selectedRows() []app.Row {
 	return out
 }
 
-// selectionChanged включает в меню только применимые пункты.
+// selectionChanged обновляет меню и подсказку под выделение.
 func (u *ui) selectionChanged() {
-	rows := u.selectedRows()
-	canStart, canStop := false, false
-	for _, r := range rows {
-		if r.Running {
-			canStop = true
-		} else if r.Status == app.StatusAlive {
-			canStart = true
-		}
-	}
 	u.showDetail()
-	if u.ctxActs.start != nil {
-		u.ctxActs.start.SetVisible(canStart)
-		u.ctxActs.stop.SetVisible(canStop)
-	}
+	u.updateMenu(u.selectedRows())
 }
 
 func (u *ui) async(f func() error) {
@@ -49,6 +37,9 @@ func (u *ui) async(f func() error) {
 }
 
 func (u *ui) startOrStop() {
+	if u.curView() == app.ViewTrash {
+		return
+	}
 	rows := u.selectedRows()
 	if len(rows) != 1 {
 		return
@@ -139,23 +130,6 @@ func (u *ui) copySelected() {
 	if len(links) > 0 {
 		_ = walk.Clipboard().SetText(strings.Join(links, "\r\n"))
 		u.status.SetText(fmt.Sprintf("Скопировано ссылок: %d", len(links)))
-	}
-}
-
-func (u *ui) deleteSelected() {
-	rows := u.selectedRows()
-	if len(rows) == 0 {
-		return
-	}
-	msg := fmt.Sprintf("Удалить из списка выбранные серверы (%d)?", len(rows))
-	if len(rows) == 1 {
-		msg = "Удалить сервер «" + CellText(rows[0], 2) + "» из списка?"
-	}
-	if walk.MsgBox(u.mw, "proxycheck", msg, walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) != walk.DlgCmdYes {
-		return
-	}
-	for _, r := range rows {
-		u.fail(u.a.Delete(r.ID))
 	}
 }
 

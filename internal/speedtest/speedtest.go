@@ -36,18 +36,17 @@ type Result struct {
 // принимает POST-тело и не проверяет содержимое.
 const DefaultUploadURL = "https://speed.cloudflare.com/__up"
 
-// DefaultUploadBytes — сколько байт отправляем для замера upload.
-// Раньше было 2 МБ (заметно меньше, чем 5 МБ на download) — при
-// типичной для публичных прокси задержке в 300-500ms такой маленький
-// объём во многом уходит на разгон TCP (slow start) и не успевает
-// показать реальную устоявшуюся скорость, из-за чего числа выглядели
-// подозрительно заниженными. Уравнял с объёмом download, чтобы оба
-// замера были сопоставимы по методике.
-const DefaultUploadBytes = 5 * 1024 * 1024
+// DefaultUploadBytes — верхний предел суммарного объёма для замера upload.
+const DefaultUploadBytes = 8 * 1024 * 1024
 
-// Upload измеряет скорость отдачи (upload) через SOCKS5-прокси на
-// localAddr — отправляет nBytes случайных данных на uploadURL POST-ом
-// и считает скорость по времени до завершения запроса.
+// Upload измеряет скорость отдачи (upload) через SOCKS5-прокси на localAddr.
+//
+// Один большой POST на медленном прокси упирался в таймаут и давал просто
+// «ошибку» без результата. Поэтому данные отправляются последовательными
+// кусками растущего размера (128 КБ … 4 МБ) по одному keep-alive соединению,
+// пока не выйдет время (timeout) или не кончится лимит nBytes. Результат —
+// скорость самого быстрого куска (когда соединение «разогналось»), так что
+// медленный сервер тоже получает измеренное, пусть и небольшое, число.
 func Upload(localSocksAddr, uploadURL string, nBytes int, timeout time.Duration) (Result, error) {
 	if uploadURL == "" {
 		uploadURL = DefaultUploadURL
@@ -59,45 +58,81 @@ func Upload(localSocksAddr, uploadURL string, nBytes int, timeout time.Duration)
 	if err != nil {
 		return Result{}, fmt.Errorf("создание SOCKS5-dialer: %w", err)
 	}
-
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialer.Dial(network, addr)
 		},
 	}
-	client := &http.Client{Transport: transport, Timeout: timeout}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
 
-	payload := make([]byte, nBytes)
-	if _, err := rand.Read(payload); err != nil {
-		return Result{}, fmt.Errorf("генерация тестовых данных: %w", err)
+	deadline := time.Now().Add(timeout)
+	var best Result
+	var sent int
+	var lastErr error
+	for _, n := range []int{128 << 10, 256 << 10, 512 << 10, 1 << 20, 2 << 20, 4 << 20} {
+		if sent+n > nBytes && sent > 0 {
+			break
+		}
+		remaining := time.Until(deadline)
+		if remaining < 700*time.Millisecond && best.Bytes > 0 {
+			break
+		}
+		if remaining <= 0 {
+			lastErr = fmt.Errorf("время вышло")
+			break
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), remaining)
+		res, err := uploadChunk(ctx, client, uploadURL, n)
+		cancel()
+		if err != nil {
+			lastErr = err
+			break
+		}
+		sent += n
+		if res.Mbps > best.Mbps {
+			best = res
+		}
+		if res.Duration > 3*time.Second { // уже устоявшаяся скорость, дальше только дольше
+			break
+		}
 	}
+	if best.Bytes == 0 {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("нет результата")
+		}
+		return Result{}, fmt.Errorf("upload: %v", lastErr)
+	}
+	return best, nil
+}
 
-	req, err := http.NewRequest(http.MethodPost, uploadURL, bytes.NewReader(payload))
+func uploadChunk(ctx context.Context, client *http.Client, url string, n int) (Result, error) {
+	payload := make([]byte, n)
+	if _, err := rand.Read(payload); err != nil {
+		return Result{}, fmt.Errorf("генерация данных: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return Result{}, err
 	}
-	req.ContentLength = int64(nBytes)
+	req.ContentLength = int64(n)
 	req.Header.Set("Content-Type", "application/octet-stream")
-
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{}, fmt.Errorf("запрос через прокси: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body) // дочитываем тело ответа, чтобы соединение корректно переиспользовалось/закрылось
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	elapsed := time.Since(start)
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Result{}, fmt.Errorf("неожиданный статус ответа: %d", resp.StatusCode)
 	}
-
 	mbps := 0.0
 	if elapsed > 0 {
-		mbps = (float64(nBytes) * 8 / 1_000_000) / elapsed.Seconds()
+		mbps = (float64(n) * 8 / 1_000_000) / elapsed.Seconds()
 	}
-
-	return Result{Bytes: int64(nBytes), Duration: elapsed, Mbps: mbps}, nil
+	return Result{Bytes: int64(n), Duration: elapsed, Mbps: mbps}, nil
 }
 
 // "127.0.0.1:1080") и измеряет скорость. maxBytes ограничивает объём

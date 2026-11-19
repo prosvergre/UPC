@@ -198,7 +198,7 @@ function render(s){
 
   $('lines').innerHTML=(s.lines||[]).map(l=>`<tr><td>${l.local_port}</td><td>${esc(l.name)}</td><td><span class="st ${l.alive?'alive':'dead'}"></span>${l.alive?'работает':'не отвечает'}</td><td><button class="sm" data-stop="${esc(l.id)}">Остановить</button></td></tr>`).join('')||'<tr><td colspan="4" class="mut">нет активных линий</td></tr>';
 
-  const rows=s.rows||[];rowsById={};rows.forEach(r=>rowsById[r.id]=r);
+  const rows=(s.rows||[]).filter(r=>!r.trashed);rowsById={};rows.forEach(r=>rowsById[r.id]=r);
   $('cnt').textContent='('+rows.filter(r=>r.status==='alive').length+' живых из '+rows.length+')';
   const keep=new Set(selectedIds());
   $('rows').innerHTML=rows.map(r=>{

@@ -95,7 +95,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/logout", s.guard(s.handleLogout))
 	mux.HandleFunc("/api/state", s.guard(s.handleState))
 	mux.HandleFunc("/api/scan", s.guard(post(func(w http.ResponseWriter, r *http.Request) { s.run(w, s.App.Scan()) })))
-	mux.HandleFunc("/api/recheck", s.guard(post(func(w http.ResponseWriter, r *http.Request) { s.run(w, s.App.Recheck()) })))
+	mux.HandleFunc("/api/recheck", s.guard(post(func(w http.ResponseWriter, r *http.Request) { s.run(w, s.App.Recheck(app.ViewAll)) })))
 	mux.HandleFunc("/api/cancel", s.guard(post(func(w http.ResponseWriter, r *http.Request) { s.App.Cancel(); s.run(w, nil) })))
 	mux.HandleFunc("/api/select", s.guard(post(s.handleSelect)))
 	mux.HandleFunc("/api/line", s.guard(s.handleLine))
@@ -371,7 +371,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		s.run(w, fmt.Errorf("некорректный запрос"))
 		return
 	}
-	s.run(w, s.App.Delete(b.ID))
+	s.run(w, s.App.Trash([]string{b.ID}))
 }
 
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {

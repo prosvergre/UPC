@@ -16,16 +16,19 @@ type rowModel struct {
 	walk.TableModelBase
 	walk.SorterBase
 
-	rows    []app.Row
-	sortCol int
-	sortAsc bool
-	checked map[string]bool
-	onCheck func(id string, on bool)
-	font    *walk.Font // шрифт таблицы (для кода страны, который рисуется вручную)
+	all          []app.Row // все строки из ядра приложения
+	rows         []app.Row // строки текущей вкладки (то, что показано)
+	view         string
+	sortCol      int
+	sortAsc      bool
+	checkedFirst bool // отмеченные всегда сверху
+	checked      map[string]bool
+	onCheck      func(id string, on bool)
+	font         *walk.Font // шрифт таблицы (для кода страны, который рисуется вручную)
 }
 
 func newRowModel() *rowModel {
-	return &rowModel{checked: map[string]bool{}, sortCol: -1, sortAsc: true}
+	return &rowModel{checked: map[string]bool{}, sortCol: -1, sortAsc: true, view: app.ViewMain}
 }
 
 func (m *rowModel) RowCount() int { return len(m.rows) }
@@ -54,6 +57,12 @@ func (m *rowModel) SetChecked(row int, on bool) error {
 
 func (m *rowModel) Sort(col int, order walk.SortOrder) error {
 	if col < 1 {
+		// клик по заголовку колонки с галочками: отмеченные всегда сверху
+		// (первый клик включает, следующий выключает)
+		m.checkedFirst = order == walk.SortAscending
+		m.SorterBase.Sort(col, order)
+		m.resort()
+		m.PublishRowsReset()
 		return nil
 	}
 	m.sortCol, m.sortAsc = col-1, order == walk.SortAscending
@@ -67,22 +76,56 @@ func (m *rowModel) resort() {
 	if m.sortCol >= 0 {
 		SortRows(m.rows, m.sortCol, m.sortAsc)
 	}
+	if m.checkedFirst {
+		CheckedFirst(m.rows, func(id string) bool { return m.checked[id] })
+	}
+}
+
+// SetView переключает вкладку.
+func (m *rowModel) SetView(view string) {
+	if m.view == view {
+		return
+	}
+	m.view = view
+	m.refilter()
+	m.PublishRowsReset()
+}
+
+func (m *rowModel) refilter() {
+	m.rows = m.rows[:0:0]
+	for _, r := range m.all {
+		if app.MatchView(r, m.view) {
+			m.rows = append(m.rows, r)
+		}
+	}
+	m.resort()
+}
+
+// Count возвращает число строк вида (для подписей вкладок).
+func (m *rowModel) Count(view string) int {
+	n := 0
+	for _, r := range m.all {
+		if app.MatchView(r, view) {
+			n++
+		}
+	}
+	return n
 }
 
 // Set подставляет новые данные; возвращает true, если таблица изменилась.
 func (m *rowModel) Set(rows []app.Row) bool {
-	if reflect.DeepEqual(rows, m.rows) {
+	if reflect.DeepEqual(rows, m.all) {
 		return false
 	}
-	m.rows = append([]app.Row(nil), rows...)
-	for _, r := range m.rows {
+	m.all = append([]app.Row(nil), rows...)
+	for _, r := range m.all {
 		if r.Selected {
 			if _, known := m.checked[r.ID]; !known {
 				m.checked[r.ID] = true
 			}
 		}
 	}
-	m.resort()
+	m.refilter()
 	m.PublishRowsReset()
 	return true
 }
@@ -99,7 +142,10 @@ func (m *rowModel) IDs(rows []int) []string {
 
 func (m *rowModel) CheckedIDs() []string {
 	var ids []string
-	for _, r := range m.rows {
+	for _, r := range m.all {
+		if r.Trashed {
+			continue
+		}
 		if m.checked[r.ID] {
 			ids = append(ids, r.ID)
 		}

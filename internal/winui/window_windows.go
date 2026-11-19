@@ -46,7 +46,8 @@ type ui struct {
 
 	manual   manualUI
 	settings settingsUI
-	ctxActs  struct{ start, stop *walk.Action }
+	views    viewState
+	viewTabs *walk.TabWidget
 }
 
 // lineModel — таблица активных линий.
@@ -103,7 +104,7 @@ func Run(a *app.App, opts Options) int {
 				Layout: HBox{Margins: Margins{Left: 8, Top: 6, Right: 8, Bottom: 6}},
 				Children: []Widget{
 					PushButton{AssignTo: &u.scanBtn, Text: "Загрузить и проверить", OnClicked: func() { u.act(a.Scan()) }},
-					PushButton{AssignTo: &u.recheckBtn, Text: "Перепроверить", OnClicked: func() { u.act(a.Recheck()) }},
+					PushButton{AssignTo: &u.recheckBtn, Text: "Перепроверить", OnClicked: func() { u.act(a.Recheck(u.curView())) }},
 					PushButton{AssignTo: &u.speedBtn, Text: "Скорость отмеченных", OnClicked: u.speedChecked},
 					PushButton{AssignTo: &u.cancelBtn, Text: "Отмена", Enabled: false, OnClicked: func() { a.Cancel() }},
 					HSpacer{},
@@ -113,35 +114,40 @@ func Run(a *app.App, opts Options) int {
 				AssignTo: &u.tabs,
 				Pages: []TabPage{
 					{Title: "Серверы", Layout: VBox{Margins: Margins{Left: 6, Top: 6, Right: 6, Bottom: 6}}, Children: []Widget{
-						GroupBox{Title: "Активные линии", Layout: VBox{Margins: Margins{Left: 4, Top: 2, Right: 4, Bottom: 4}}, MaxSize: Size{Height: 120}, Children: []Widget{
-							TableView{
-								AssignTo: &u.linesTV, Model: u.lm, MinSize: Size{Height: 60},
-								Columns: []TableViewColumn{{Title: "Порт", Width: 70}, {Title: "Сервер", Width: 420}, {Title: "Статус", Width: 110}},
-								ContextMenuItems: []MenuItem{
-									Action{Text: "Остановить линию", OnTriggered: u.stopSelectedLine},
-									Action{Text: "Копировать адрес прокси", OnTriggered: u.copyLineAddr},
+						VSplitter{HandleWidth: 7, Children: []Widget{
+							GroupBox{Title: "Активные линии", StretchFactor: 1, Layout: VBox{Margins: Margins{Left: 4, Top: 2, Right: 4, Bottom: 4}}, Children: []Widget{
+								TableView{
+									AssignTo: &u.linesTV, Model: u.lm, MinSize: Size{Height: 50},
+									Columns: []TableViewColumn{{Title: "Порт", Width: 70}, {Title: "Сервер", Width: 420}, {Title: "Статус", Width: 110}},
+									ContextMenuItems: []MenuItem{
+										Action{Text: "Остановить линию", OnTriggered: u.stopSelectedLine},
+										Action{Text: "Копировать адрес прокси", OnTriggered: u.copyLineAddr},
+									},
 								},
-							},
+							}},
+							Composite{StretchFactor: 5, Layout: VBox{MarginsZero: true, SpacingZero: true}, Children: []Widget{
+								TabWidget{AssignTo: &u.viewTabs, MaxSize: Size{Height: 28}, OnCurrentIndexChanged: u.onViewChanged},
+								Composite{
+									Layout: HBox{Margins: Margins{Top: 4, Bottom: 4}, Spacing: 6},
+									Children: []Widget{
+										PushButton{AssignTo: &u.views.newBtn, Text: "Новая вкладка…", OnClicked: u.addGroup},
+										PushButton{AssignTo: &u.views.renameBtn, Text: "Переименовать…", OnClicked: u.renameGroup},
+										PushButton{AssignTo: &u.views.delBtn, Text: "Удалить вкладку", OnClicked: u.deleteGroup},
+										HSpacer{},
+										PushButton{AssignTo: &u.views.restoreBtn, Text: "Восстановить", OnClicked: u.restoreSelected},
+										PushButton{AssignTo: &u.views.foreverBtn, Text: "Удалить окончательно", OnClicked: u.forgetSelected},
+										PushButton{AssignTo: &u.views.emptyBtn, Text: "Очистить корзину", OnClicked: u.emptyTrash},
+									},
+								},
+								TableView{
+									AssignTo: &u.tv, Model: u.rm, Columns: cols,
+									CheckBoxes: true, MultiSelection: true, AlternatingRowBG: true, ColumnsOrderable: false,
+									StyleCell:                u.rm.StyleCell,
+									OnItemActivated:          u.startOrStop,
+									OnSelectedIndexesChanged: u.selectionChanged,
+								},
+							}},
 						}},
-						TableView{
-							AssignTo: &u.tv, Model: u.rm, Columns: cols,
-							CheckBoxes: true, MultiSelection: true, AlternatingRowBG: true, ColumnsOrderable: false,
-							StyleCell:       u.rm.StyleCell,
-							OnItemActivated: u.startOrStop,
-							ContextMenuItems: []MenuItem{
-								Action{AssignTo: &u.ctxActs.start, Text: "Запустить линию", OnTriggered: u.startSelected},
-								Action{AssignTo: &u.ctxActs.stop, Text: "Остановить линию", OnTriggered: u.stopSelected},
-								Action{Text: "Проверить", OnTriggered: u.checkSelected},
-								Action{Text: "Замерить скорость", OnTriggered: u.speedSelected},
-								Separator{},
-								Action{Text: "Редактировать…", OnTriggered: u.editSelected},
-								Action{Text: "Конфиг…", OnTriggered: u.configSelected},
-								Action{Text: "Копировать ссылку", OnTriggered: u.copySelected},
-								Separator{},
-								Action{Text: "Удалить из списка", OnTriggered: u.deleteSelected},
-							},
-							OnSelectedIndexesChanged: u.selectionChanged,
-						},
 					}},
 					{Title: "Вручную", Layout: VBox{}, Children: u.manualPage()},
 					{Title: "Настройки", Layout: VBox{}, Children: u.settingsPage()},
@@ -223,6 +229,7 @@ func (u *ui) apply(s app.Snapshot) {
 	u.recheckBtn.SetEnabled(!u.busy)
 	u.speedBtn.SetEnabled(!u.busy)
 	u.cancelBtn.SetEnabled(u.busy)
+	u.updateViewButtons()
 
 	// выделение сохраняем по ID, чтобы оно не прыгало при обновлении таблицы
 	keep := u.rm.IDs(u.tv.SelectedIndexes())
@@ -235,6 +242,7 @@ func (u *ui) apply(s app.Snapshot) {
 		}
 		_ = u.tv.SetSelectedIndexes(idx)
 	}
+	u.syncViews(s.Groups)
 	if !reflect.DeepEqual(s.Lines, u.lm.rows) {
 		u.lm.rows = s.Lines
 		u.lm.PublishRowsReset()
@@ -275,7 +283,8 @@ func (u *ui) afterCreate() {
 		sb.SetVisible(false)
 	}
 	u.rm.font = u.tv.Font()
-	u.selectionChanged()
+	u.setupMenu()
+	u.syncViews(nil)
 	u.manual.init(u)
 	u.settings.init(u)
 }
@@ -347,7 +356,9 @@ func (u *ui) showDetail() {
 		if t := CellTip(r, 7); t != "" {
 			text = "Выходной IP не определён: " + t
 		} else if t := CellTip(r, 8); t != "" && r.SpeedMbps == 0 {
-			text = "Замер скорости: " + t
+			text = "Скорость скачивания не измерена: " + t
+		} else if t := CellTip(r, 9); t != "" && r.UlMbps == 0 {
+			text = "Скорость отдачи не измерена: " + t
 		}
 	}
 	if u.detail.Text() != text {

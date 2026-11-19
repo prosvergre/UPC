@@ -60,6 +60,10 @@ type Row struct {
 	SpeedMbps float64 `json:"speed_mbps,omitempty"`
 	UlMbps    float64 `json:"ul_mbps,omitempty"`
 	Pinned    bool    `json:"pinned,omitempty"`
+	Group     string  `json:"group,omitempty"`   // пользовательская вкладка; пусто — общий список
+	Trashed   bool    `json:"trashed,omitempty"` // в корзине
+	Busy      string  `json:"busy,omitempty"`    // что делается со строкой сейчас: check | speed | queued
+	UlErr     string  `json:"ul_err,omitempty"`  // почему не измерилась скорость отдачи
 
 	node node.Node
 }
@@ -88,6 +92,7 @@ type Snapshot struct {
 	Lines    []Line   `json:"lines"`
 	Activity Activity `json:"activity"`
 	Log      []string `json:"log"`
+	Groups   []string `json:"groups"`
 	Core     string   `json:"core"` // путь к sing-box или текст ошибки
 	CoreOK   bool     `json:"core_ok"`
 }
@@ -125,7 +130,8 @@ func New(settingsPath string) *App {
 	}
 	for _, sr := range a.settings.LastScanServers {
 		r := &Row{node: sr.Server, Status: normStatus(sr), LatencyMs: sr.LatencyMs, ExitIP: sr.ExitIP,
-			Selected: sr.Selected, SpeedMbps: sr.SpeedMbps, UlMbps: sr.UlSpeedMbps, Pinned: sr.Pinned}
+			Selected: sr.Selected, SpeedMbps: sr.SpeedMbps, UlMbps: sr.UlSpeedMbps, Pinned: sr.Pinned,
+			Group: sr.Group, Trashed: sr.Trashed}
 		fill(r)
 		a.rows = append(a.rows, r)
 	}
@@ -174,7 +180,7 @@ func (a *App) Logf(format string, args ...interface{}) {
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Snapshot{Activity: a.act, Log: append([]string(nil), a.logs...), Core: a.engCfg.Binary}
+	s := Snapshot{Groups: append([]string(nil), a.settings.Groups...), Activity: a.act, Log: append([]string(nil), a.logs...), Core: a.engCfg.Binary}
 	s.CoreOK = a.engCfg.Binary != ""
 	if !s.CoreOK {
 		s.Core = a.coreErr
@@ -308,6 +314,22 @@ func (a *App) Scan() error {
 			}
 		}
 		a.mu.Unlock()
+		// серверы из корзины не проверяем (и не возвращаем в общий список)
+		a.mu.Lock()
+		trashed := map[string]bool{}
+		for _, r := range a.rows {
+			if r.Trashed {
+				trashed[r.ID] = true
+			}
+		}
+		a.mu.Unlock()
+		keep := all[:0:0]
+		for _, n := range all {
+			if !trashed[n.ID()] {
+				keep = append(keep, n)
+			}
+		}
+		all = keep
 		a.Logf("получено %d серверов из %d источников", len(all), len(perSub))
 		results := a.check(ctx, all)
 		if results != nil {
@@ -556,23 +578,17 @@ func (a *App) AddManual(n node.Node, replaceID string) (string, error) {
 	return res.IDs[0], nil
 }
 
-// Recheck перепроверяет уже известные серверы без загрузки источников.
-func (a *App) Recheck() error {
-	ctx, err := a.begin(Checking, "перепроверка")
-	if err != nil {
-		return err
+// Recheck перепроверяет серверы указанного вида (вкладки), не загружая источники.
+// Корзина не проверяется. Результаты обновляют строки на месте: ничего не удаляется.
+func (a *App) Recheck(view string) error {
+	if view == ViewTrash {
+		return fmt.Errorf("серверы в корзине не проверяются")
 	}
-	a.mu.Lock()
-	var all []node.Node
-	for _, r := range a.rows {
-		all = append(all, r.node)
+	ids := a.ViewIDs(view)
+	if len(ids) == 0 {
+		return fmt.Errorf("на этой вкладке нет серверов для проверки")
 	}
-	a.mu.Unlock()
-	go func() {
-		defer a.end()
-		a.check(ctx, all)
-	}()
-	return nil
+	return a.CheckIDs(ids)
 }
 
 func (a *App) check(ctx context.Context, all []node.Node) []engine.Result {
@@ -640,7 +656,7 @@ func (a *App) applyResults(results []engine.Result) {
 	for _, res := range results {
 		id := res.Node.ID()
 		p := prev[id]
-		important := p != nil && (p.Running || p.Selected || p.Pinned || p.Status == StatusAlive || p.Status == StatusDied)
+		important := p != nil && (p.Running || p.Selected || p.Pinned || p.Group != "" || p.Trashed || p.Status == StatusAlive || p.Status == StatusDied)
 		seen[id] = true
 		if !res.Alive && !important {
 			continue
@@ -651,7 +667,8 @@ func (a *App) applyResults(results []engine.Result) {
 		if p != nil {
 			prevStatus = p.Status
 			r.Running, r.LocalPort, r.Selected, r.Pinned = p.Running, p.LocalPort, p.Selected, p.Pinned
-			r.ExitIP, r.SpeedMbps, r.UlMbps = p.ExitIP, p.SpeedMbps, p.UlMbps
+			r.Group, r.Trashed, r.Busy = p.Group, p.Trashed, p.Busy
+			r.ExitIP, r.SpeedMbps, r.UlMbps, r.SpeedErr, r.UlErr, r.ExitErr = p.ExitIP, p.SpeedMbps, p.UlMbps, p.SpeedErr, p.UlErr, p.ExitErr
 		}
 		r.Status = nextStatus(prevStatus, res.Alive)
 		if res.Alive {
@@ -660,7 +677,7 @@ func (a *App) applyResults(results []engine.Result) {
 		rows = append(rows, r)
 	}
 	for id, p := range prev { // линии и отмеченные не теряем, даже если не попали в проверку
-		if !seen[id] && (p.Running || p.Selected || p.Pinned) {
+		if !seen[id] && (p.Running || p.Selected || p.Pinned || p.Group != "" || p.Trashed) {
 			rows = append(rows, p)
 		}
 	}
@@ -727,7 +744,8 @@ func (a *App) save() {
 	for _, r := range a.rows {
 		st.LastScanServers = append(st.LastScanServers, settings.ScanRow{Server: r.node, Status: r.Status,
 			Alive: r.Status == StatusAlive, LatencyMs: r.LatencyMs, Selected: r.Selected, ExitIP: r.ExitIP,
-			SpeedMbps: r.SpeedMbps, SpeedDone: r.SpeedMbps > 0, UlSpeedMbps: r.UlMbps, UlSpeedDone: r.UlMbps > 0, Pinned: r.Pinned})
+			SpeedMbps: r.SpeedMbps, SpeedDone: r.SpeedMbps > 0, UlSpeedMbps: r.UlMbps, UlSpeedDone: r.UlMbps > 0, Pinned: r.Pinned,
+			Group: r.Group, Trashed: r.Trashed})
 	}
 	a.settings = st
 	a.mu.Unlock()
@@ -817,8 +835,10 @@ func (a *App) SpeedTest(ids []string) error {
 	if err != nil {
 		return err
 	}
+	a.setBusy(nodes, "queued")
 	go func() {
 		defer a.end()
+		defer a.setBusy(nodes, "")
 		lab, err := a.newLab(nodes, 1)
 		if err != nil {
 			a.Logf("ядро: %v", err)
@@ -830,14 +850,18 @@ func (a *App) SpeedTest(ids []string) error {
 				return
 			}
 			a.setAct(Speed, "замер скорости: "+n.Label(), i, len(nodes))
+			a.setBusy([]node.Node{n}, "speed")
 			down, up, derr, uerr := lab.Speed(ctx, n, true, 20*time.Second)
+			a.setBusy([]node.Node{n}, "")
 			a.mu.Lock()
 			if r, ok := a.find(n.ID()); ok {
 				if derr == nil {
 					r.SpeedMbps = down.Mbps
 				}
 				if uerr == nil {
-					r.UlMbps = up.Mbps
+					r.UlMbps, r.UlErr = up.Mbps, ""
+				} else if derr == nil {
+					r.UlErr = uerr.Error()
 				}
 			}
 			a.mu.Unlock()
@@ -852,7 +876,11 @@ func (a *App) SpeedTest(ids []string) error {
 			if derr != nil {
 				a.Logf("%s: ошибка замера: %v", n.Label(), derr)
 			} else {
-				a.Logf("%s: ↓ %.1f Мбит/с", n.Label(), down.Mbps)
+				if uerr != nil {
+					a.Logf("%s: ↓ %.1f Мбит/с, отдача не измерилась: %v", n.Label(), down.Mbps, uerr)
+				} else {
+					a.Logf("%s: ↓ %.1f ↑ %.1f Мбит/с", n.Label(), down.Mbps, up.Mbps)
+				}
 			}
 		}
 		a.save()
@@ -1069,8 +1097,10 @@ func (a *App) CheckIDs(ids []string) error {
 	if err != nil {
 		return err
 	}
+	a.setBusy(nodes, "check")
 	go func() {
 		defer a.end()
+		defer a.setBusy(nodes, "")
 		a.checkPartial(ctx, nodes)
 	}()
 	return nil
@@ -1100,6 +1130,7 @@ func (a *App) checkPartial(ctx context.Context, nodes []node.Node) {
 			r.LatencyMs = res.Latency.Milliseconds()
 		}
 	}
+	a.refreshPoolLocked()
 	a.mu.Unlock()
 	if a.DetectExit {
 		var alive []node.Node

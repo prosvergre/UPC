@@ -56,3 +56,32 @@ func TestActivity(t *testing.T) {
 		t.Error("без прогресса")
 	}
 }
+
+func TestBusyAndUploadErrorCells(t *testing.T) {
+	r := app.Row{Status: app.StatusAlive, Busy: "speed"}
+	if CellText(r, 8) != "замер…" || CellText(r, 9) != "замер…" {
+		t.Error("индикатор замера")
+	}
+	r.Busy = "queued"
+	if CellText(r, 8) != "в очереди" {
+		t.Error("очередь")
+	}
+	r.Busy = "check"
+	if CellText(r, 1) != "проверка…" {
+		t.Error("проверка")
+	}
+	r = app.Row{Status: app.StatusAlive, SpeedMbps: 10, UlErr: "таймаут"}
+	if CellText(r, 8) != "10.0" || CellText(r, 9) != "ошибка" || CellTip(r, 9) != "таймаут" {
+		t.Error("ошибка отдачи при удачном скачивании")
+	}
+}
+
+func TestCheckedFirst(t *testing.T) {
+	rows := []app.Row{{ID: "a"}, {ID: "b"}, {ID: "c"}, {ID: "d"}}
+	checked := map[string]bool{"b": true, "d": true}
+	CheckedFirst(rows, func(id string) bool { return checked[id] })
+	got := rows[0].ID + rows[1].ID + rows[2].ID + rows[3].ID
+	if got != "bdac" {
+		t.Errorf("отмеченные наверх с сохранением порядка: %s", got)
+	}
+}

@@ -85,6 +85,8 @@ type Settings struct {
 	// Subscriptions — источники серверов. Пусто при первом запуске: тогда
 	// заполняется встроенным списком.
 	Subscriptions []Subscription `json:"subscriptions,omitempty"`
+	// Groups — пользовательские вкладки со списками серверов.
+	Groups []string `json:"groups,omitempty"`
 	// LinesLAN — принимать подключения к линиям из локальной сети (иначе только с этого компьютера).
 	LinesLAN bool `json:"lines_lan,omitempty"`
 	// AutoScanMin — период автозагрузки и проверки, минут (0 — выключено).
@@ -130,7 +132,9 @@ type ScanRow struct {
 	UlSpeedMbps      float64 `json:"ul_speed_mbps,omitempty"`
 	UlSpeedDone      bool    `json:"ul_speed_done,omitempty"`
 	UlSpeedAttempted bool    `json:"ul_speed_attempted,omitempty"`
-	Pinned           bool    `json:"pinned,omitempty"` // добавлен вручную: не удаляется при проверке
+	Pinned           bool    `json:"pinned,omitempty"`  // добавлен вручную: не удаляется при проверке
+	Group            string  `json:"group,omitempty"`   // пользовательская вкладка (пусто — общий список)
+	Trashed          bool    `json:"trashed,omitempty"` // в корзине
 }
 
 // DefaultPath возвращает путь к settings.json рядом с исполняемым
