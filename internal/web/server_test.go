@@ -172,8 +172,23 @@ func TestImportAndConfig(t *testing.T) {
 	if r := do(t, ts.Client(), "POST", ts.URL+"/api/delete", `{"id":"`+res.IDs[0]+`"}`, xr); r.StatusCode != 200 {
 		t.Fatalf("delete: %d", r.StatusCode)
 	}
-	if r := do(t, ts.Client(), "GET", ts.URL+"/api/config?id="+res.IDs[0], "", nil); r.StatusCode != 400 {
-		t.Fatalf("после удаления конфиг не должен находиться: %d", r.StatusCode)
+	// удаление теперь кладёт сервер в корзину (окончательное удаление — оттуда)
+	r = do(t, ts.Client(), "GET", ts.URL+"/api/state", "", nil)
+	var st struct {
+		Rows []struct {
+			ID      string `json:"id"`
+			Trashed bool   `json:"trashed"`
+		}
+	}
+	decode(t, r, &st)
+	found := false
+	for _, row := range st.Rows {
+		if row.ID == res.IDs[0] {
+			found = row.Trashed
+		}
+	}
+	if !found {
+		t.Fatalf("удалённый сервер должен лежать в корзине: %+v", st.Rows)
 	}
 }
 
